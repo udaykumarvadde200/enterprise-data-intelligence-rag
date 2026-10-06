@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / editors
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project data
+data/documents/*
+data/structured/*
+!data/documents/.gitkeep
+!data/structured/.gitkeep
+
+# Local vector/database files
+.chroma/
+chroma_db/
+*.db
+
+# Logs
+*.log
