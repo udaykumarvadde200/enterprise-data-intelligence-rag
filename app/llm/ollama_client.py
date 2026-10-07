@@ -1,18 +1,17 @@
 from langchain_ollama import ChatOllama
 
 
-def main():
-    llm = ChatOllama(
-        model="llama3.2:3b",
-        temperature=0,
-    )
+class OllamaClient:
+    def __init__(
+        self,
+        model: str = "llama3.2:3b",
+        temperature: float = 0.0,
+    ):
+        self.llm = ChatOllama(
+            model=model,
+            temperature=temperature,
+        )
 
-    response = llm.invoke(
-        "Explain SQL in one sentence."
-    )
-
-    print(response.content)
-
-
-if __name__ == "__main__":
-    main()
+    def invoke(self, prompt: str) -> str:
+        response = self.llm.invoke(prompt)
+        return response.content 
