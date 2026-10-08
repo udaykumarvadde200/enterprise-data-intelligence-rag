@@ -7,6 +7,8 @@ from app.sql.schema_formatter import SchemaFormatter
 from app.sql.sql_executor import SQLExecutor
 from app.sql.sql_generator import SQLGenerator
 from app.sql.sql_validator import SQLValidator
+from app.conversation.state import ConversationState
+from app.sql.clarification_resolver import ClarificationResolver
 
 
 class SQLPipeline:
@@ -25,23 +27,119 @@ class SQLPipeline:
         self.customer_reference_extractor = (
             CustomerReferenceExtractor(self.llm)
         )
+
         self.ambiguity_checker = AmbiguityChecker(self.db)
 
+        self.conversation_state = ConversationState()
+        self.clarification_resolver = ClarificationResolver()
+
     def run(self, question: str):
-        # 1. Check whether the question contains a customer reference
-        customer_reference = self.customer_reference_extractor.extract(
-            question
+
+        # Stores the exact customer ID when a clarification
+        # resolves an ambiguous customer reference.
+        resolved_customer_id = None
+
+        # ---------------------------------------------------------
+        # 1. Handle response to a previous clarification
+        # ---------------------------------------------------------
+        if self.conversation_state.status == "awaiting_clarification":
+
+            resolution = self.clarification_resolver.resolve_customer(
+                question,
+                self.conversation_state.pending_customers,
+            )
+
+            if resolution["status"] == "not_found":
+                return {
+                    "status": "clarification_required",
+                    "message": (
+                        "I could not determine which customer you mean. "
+                        "Please specify the city or full customer name."
+                    ),
+                }
+
+            if resolution["status"] == "ambiguous":
+
+                options = "\n".join(
+                    f"- {name} — {city}"
+                    for _customer_id, name, city
+                    in resolution["customers"]
+                )
+
+                return {
+                    "status": "clarification_required",
+                    "message": (
+                        "Your clarification still matches "
+                        "multiple customers:\n"
+                        f"{options}"
+                    ),
+                }
+
+            # Customer successfully resolved
+            customer_id, customer_name, customer_city = (
+                resolution["customer"]
+            )
+
+            resolved_customer_id = customer_id
+
+            # Recover original question
+            original_question = (
+                self.conversation_state.pending_question
+            )
+
+            pending_reference = (
+                self.conversation_state.pending_customer_reference
+            )
+
+            # Clear clarification state
+            self.conversation_state.status = None
+            self.conversation_state.pending_question = None
+            self.conversation_state.pending_customer_reference = None
+            self.conversation_state.pending_customers = []
+
+            # Replace the ambiguous reference with the resolved
+            # customer's name for natural-language context.
+            question = original_question.replace(
+                pending_reference,
+                customer_name,
+            )
+
+        # ---------------------------------------------------------
+        # 2. Extract customer reference
+        # ---------------------------------------------------------
+        customer_reference = (
+            self.customer_reference_extractor.extract(question)
         )
 
-        # 2. If a customer is mentioned, check whether the reference
-        #    uniquely identifies a customer.
-        if customer_reference != "NONE":
-            ambiguity_result = self.ambiguity_checker.check_customer_name(
-                customer_reference
+        # ---------------------------------------------------------
+        # 3. Check customer ambiguity
+        #
+        # Skip this if the customer was already resolved through
+        # the clarification flow.
+        # ---------------------------------------------------------
+        if (
+            customer_reference != "NONE"
+            and resolved_customer_id is None
+        ):
+
+            ambiguity_result = (
+                self.ambiguity_checker.check_customer_name(
+                    customer_reference
+                )
             )
 
             if ambiguity_result["status"] == "ambiguous":
+
                 matches = ambiguity_result["matches"]
+
+                self.conversation_state.pending_question = question
+                self.conversation_state.pending_customer_reference = (
+                    customer_reference
+                )
+                self.conversation_state.pending_customers = matches
+                self.conversation_state.status = (
+                    "awaiting_clarification"
+                )
 
                 options = "\n".join(
                     f"- {name} — {city}"
@@ -59,6 +157,7 @@ class SQLPipeline:
                 }
 
             if ambiguity_result["status"] == "not_found":
+
                 return {
                     "status": "not_found",
                     "message": (
@@ -67,33 +166,57 @@ class SQLPipeline:
                     ),
                 }
 
-        # 3. Get database schema
+        # ---------------------------------------------------------
+        # 4. Get database schema
+        # ---------------------------------------------------------
         schema = self.schema_inspector.get_schema()
 
-        # 4. Format schema for the LLM
-        formatted_schema = self.schema_formatter.format_schema(schema)
+        # ---------------------------------------------------------
+        # 5. Format schema
+        # ---------------------------------------------------------
+        formatted_schema = (
+            self.schema_formatter.format_schema(schema)
+        )
 
-        # 5. Generate SQL
+        # ---------------------------------------------------------
+        # 6. Generate SQL
+        # ---------------------------------------------------------
         sql = self.sql_generator.generate(
             question,
             formatted_schema,
+            resolved_customer_id=resolved_customer_id,
         )
 
-        # 6. Validate generated SQL
+        # ---------------------------------------------------------
+        # 7. Validate SQL syntax
+        # ---------------------------------------------------------
         if not self.sql_validator.validate_syntax(sql):
-            raise ValueError("Generated SQL has invalid syntax.")
+            raise ValueError(
+                "Generated SQL has invalid syntax."
+            )
 
-        if not self.sql_validator.validate_schema(sql, schema):
+        # ---------------------------------------------------------
+        # 8. Validate database schema
+        # ---------------------------------------------------------
+        if not self.sql_validator.validate_schema(
+            sql,
+            schema,
+        ):
             raise ValueError(
                 "Generated SQL references an invalid schema."
             )
 
+        # ---------------------------------------------------------
+        # 9. Validate read-only safety
+        # ---------------------------------------------------------
         if not self.sql_validator.validate_read_only(sql):
             raise ValueError(
                 "Only read-only SQL queries are allowed."
             )
 
-        # 7. Execute validated SQL
+        # ---------------------------------------------------------
+        # 10. Execute SQL
+        # ---------------------------------------------------------
         results = self.sql_executor.execute(sql)
 
         return {
