@@ -39,8 +39,10 @@ class SQLValidator:
                 return False
 
             query_tables[alias] = table_name
-
+        
         for column in parsed_sql.find_all(exp.Column):
+            if column.name == "*":
+                continue
             column_name = column.name
             table_reference = column.table
 

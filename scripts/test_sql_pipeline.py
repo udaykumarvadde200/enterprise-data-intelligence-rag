@@ -4,20 +4,36 @@ from app.sql.sql_pipeline import SQLPipeline
 def main():
     pipeline = SQLPipeline()
 
-    question = "Show customers from Bangalore."
+    questions = [
+        "Show me John's orders.",
+        "Show me Rahul Sharma's orders.",
+    ]
 
-    sql, results = pipeline.run(question)
+    for question in questions:
+        print("\n" + "=" * 60)
+        print("USER QUESTION:")
+        print(question)
 
-    print("USER QUESTION:")
-    print(question)
+        response = pipeline.run(question)
 
-    print("\nGENERATED SQL:")
-    print(sql)
+        print("\nSTATUS:")
+        print(response["status"])
 
-    print("\nQUERY RESULT:")
+        if response["status"] == "clarification_required":
+            print("\nMESSAGE:")
+            print(response["message"])
 
-    for row in results:
-        print(row)
+        elif response["status"] == "not_found":
+            print("\nMESSAGE:")
+            print(response["message"])
+
+        elif response["status"] == "success":
+            print("\nGENERATED SQL:")
+            print(response["sql"])
+
+            print("\nQUERY RESULT:")
+            for row in response["results"]:
+                print(row)
 
 
 if __name__ == "__main__":

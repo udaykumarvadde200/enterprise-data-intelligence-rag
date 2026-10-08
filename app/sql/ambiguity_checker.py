@@ -14,7 +14,7 @@ class AmbiguityChecker:
 
         with self.db.connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(sql, (name,))
+                cursor.execute(sql, (f"%{name}%",))
                 return cursor.fetchall()
 
     def check_customer_name(self, name: str):
