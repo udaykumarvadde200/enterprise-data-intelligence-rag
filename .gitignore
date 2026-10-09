@@ -43,3 +43,11 @@ chroma_db/
 *.log
 
 chroma_db_test/
+# End-to-end RAG smoke-test database
+chroma_db_rag_smoke/
+
+# End-to-end RAG smoke-test database
+chroma_db_rag_smoke/
+
+# End-to-end RAG smoke-test database
+chroma_db_rag_smoke/
