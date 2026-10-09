@@ -96,13 +96,89 @@ def test_upload_rejects_duplicate_filename(tmp_path, monkeypatch):
 
 
 def test_list_documents(tmp_path, monkeypatch):
-    (tmp_path / "policy.txt").write_text("Policy content.", encoding="utf-8")
-    (tmp_path / "ignored.csv").write_text("a,b", encoding="utf-8")
+    (tmp_path / "policy.txt").write_text(
+        "Policy content.", encoding="utf-8"
+    )
+    (tmp_path / "ignored.csv").write_text(
+        "a,b", encoding="utf-8"
+    )
+
     monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path)
     client = TestClient(main.app)
 
     response = client.get("/documents")
 
     assert response.status_code == 200
-    assert response.json()["count"] == 1
-    assert response.json()["documents"][0]["filename"] == "policy.txt"
+
+    data = response.json()
+    assert data["count"] == 2
+
+    filenames = {
+        item["filename"] for item in data["documents"]
+    }
+    assert filenames == {"policy.txt", "ignored.csv"}
+
+
+def test_upload_csv_document(tmp_path, monkeypatch):
+    fake = FakeWorkflow()
+    monkeypatch.setattr(main, "workflow", fake)
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path)
+    client = TestClient(main.app)
+
+    csv_content = (
+        "customer_id,name,city\n"
+        "CUST-901,Aarav Hyderabad,Hyderabad\n"
+        "CUST-902,Meera Bengaluru,Bengaluru\n"
+    )
+
+    response = client.post(
+        "/documents/upload",
+        files={
+            "file": (
+                "customers.csv",
+                csv_content.encode("utf-8"),
+                "text/csv",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["filename"] == "customers.csv"
+    assert (tmp_path / "customers.csv").read_text(encoding="utf-8") == csv_content
+    assert fake.refreshed is True
+
+
+def test_upload_rejects_empty_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/documents/upload",
+        files={"file": ("empty.csv", b"", "text/csv")},
+    )
+
+    assert response.status_code == 400
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_upload_sanitizes_filename(tmp_path, monkeypatch):
+    fake = FakeWorkflow()
+    monkeypatch.setattr(main, "workflow", fake)
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", tmp_path)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/documents/upload",
+        files={
+            "file": (
+                r"..\nested\customers.csv",
+                b"customer_id,name\nCUST-901,Aarav\n",
+                "text/csv",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["filename"] == "customers.csv"
+    assert (tmp_path / "customers.csv").is_file()
+    assert not (tmp_path / "nested" / "customers.csv").exists()

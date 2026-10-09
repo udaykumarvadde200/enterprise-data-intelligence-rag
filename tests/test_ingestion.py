@@ -64,10 +64,12 @@ def test_empty_document_list_returns_empty_chunks():
     assert TextChunker().split_documents([]) == []
 
 
-def test_invalid_chunk_configuration_raises_error():
-    with pytest.raises(ValueError):
-        TextChunker(chunk_size=100, chunk_overlap=100)
+def test_unsupported_file_type_raises_error(tmp_path):
+    file_path = tmp_path / "data.xyz"
+    file_path.write_text("some content", encoding="utf-8")
 
+    with pytest.raises(ValueError, match="Unsupported file type"):
+        DocumentLoader().load_file(file_path)
 
 def test_load_pdf_preserves_page_metadata(tmp_path, monkeypatch):
     file_path = tmp_path / "policy.pdf"

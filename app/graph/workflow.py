@@ -87,7 +87,7 @@ class EnterpriseWorkflow:
 
         if not files:
             raise FileNotFoundError(
-                "No PDF or TXT documents found in data/documents."
+                "No supported documents found in data/documents."
             )
 
         vector_store = ChromaVectorStore(

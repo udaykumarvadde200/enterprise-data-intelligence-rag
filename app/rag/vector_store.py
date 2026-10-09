@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 
 from langchain_chroma import Chroma
@@ -17,9 +18,7 @@ class ChromaVectorStore:
     ) -> None:
         self.persist_directory = str(Path(persist_directory))
 
-        self.embeddings = OllamaEmbeddings(
-            model=embedding_model,
-        )
+        self.embeddings = OllamaEmbeddings(model=embedding_model)
 
         self.store = Chroma(
             collection_name=collection_name,
@@ -29,17 +28,15 @@ class ChromaVectorStore:
 
     @staticmethod
     def _document_id(document: Document) -> str:
-        """Generate a deterministic ID for a chunk."""
-        metadata = document.metadata
-
-        identity = "|".join(
-            str(value)
-            for value in (
-                metadata.get("source", ""),
-                metadata.get("page", ""),
-                metadata.get("start_index", ""),
-                document.page_content,
-            )
+        """Generate a deterministic ID from content and all chunk metadata."""
+        identity = json.dumps(
+            {
+                "metadata": document.metadata,
+                "content": document.page_content,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
         )
 
         return hashlib.sha256(identity.encode("utf-8")).hexdigest()
@@ -69,13 +66,16 @@ class ChromaVectorStore:
                 )
             )
 
+        ids = [self._document_id(document) for document in chunks]
+
+        if len(ids) != len(set(ids)):
+            raise ValueError(
+                "Duplicate chunk IDs detected. "
+                "Each chunk must have unique content or metadata."
+            )
+
         # Remove stale chunks from an earlier version of this source.
         self.store.delete(where={"source": source})
-
-        ids = [
-            self._document_id(document)
-            for document in chunks
-        ]
 
         self.store.add_documents(
             documents=chunks,
