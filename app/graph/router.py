@@ -1,5 +1,24 @@
+import re
+
+
 class QueryRouter:
-    """Routes user questions to SQL, RAG, or hybrid processing."""
+    """Route greetings, document questions, database questions, or hybrid queries."""
+
+    GREETING_PATTERNS = (
+        r"hi",
+        r"hello",
+        r"hey",
+        r"hi there",
+        r"hello there",
+        r"good morning",
+        r"good afternoon",
+        r"good evening",
+        r"how are you",
+        r"thanks",
+        r"thank you",
+        r"bye",
+        r"goodbye",
+    )
 
     HYBRID_KEYWORDS = (
         "and how many",
@@ -13,7 +32,14 @@ class QueryRouter:
     )
 
     RAG_KEYWORDS = (
+        "resume",
+        "resumes",
+        "cv",
+        "curriculum vitae",
+        "uploaded file",
+        "uploaded document",
         "document",
+        "documents",
         "pdf",
         "policy",
         "policies",
@@ -26,6 +52,11 @@ class QueryRouter:
         "summarize",
         "summarise",
         "explain the document",
+        "what is in the file",
+        "what is in the document",
+        "what is in the resume",
+        "what does the file say",
+        "what does the document say",
     )
 
     SQL_KEYWORDS = (
@@ -53,26 +84,37 @@ class QueryRouter:
         "list all",
     )
 
-    def route(self, question: str) -> str:
-        normalized = question.lower().strip()
+    @classmethod
+    def _contains_phrase(cls, question: str, phrases: tuple[str, ...]) -> bool:
+        """Match phrases without accidentally matching inside other words."""
+        return any(
+            re.search(
+                rf"(?<!\w){re.escape(phrase)}(?!\w)",
+                question,
+            )
+            is not None
+            for phrase in phrases
+        )
 
-        # Questions requiring both documents and structured data
-        if any(
-            keyword in normalized
-            for keyword in self.HYBRID_KEYWORDS
-        ):
+    def route(self, question: str) -> str:
+        """Return general, rag, sql, or hybrid."""
+        normalized = " ".join(question.casefold().split()).strip()
+
+        if not normalized:
+            return "general"
+
+        # Greetings and conversational messages should never query the database.
+        if normalized.strip(" \t!.,?") in self.GREETING_PATTERNS:            
+            return "general"
+
+        # Cross-source questions must take priority over single-source routing.
+        if self._contains_phrase(normalized, self.HYBRID_KEYWORDS):
             return "hybrid"
 
-        has_rag_intent = any(
-            keyword in normalized
-            for keyword in self.RAG_KEYWORDS
-        )
+        has_rag_intent = self._contains_phrase(normalized, self.RAG_KEYWORDS)
+        has_sql_intent = self._contains_phrase(normalized, self.SQL_KEYWORDS)
 
-        has_sql_intent = any(
-            keyword in normalized
-            for keyword in self.SQL_KEYWORDS
-        )
-
+        # Explicit document intent wins over incidental database-related words.
         if has_rag_intent and has_sql_intent:
             return "hybrid"
 
@@ -82,6 +124,5 @@ class QueryRouter:
         if has_sql_intent:
             return "sql"
 
-        # Default to SQL for now. We'll improve routing and
-        # ambiguity detection as the full workflow develops.
-        return "sql"
+        # Do not guess that an unrecognized question is a database query.
+        return "general"

@@ -21,19 +21,17 @@ from app.sql.sql_pipeline import SQLPipeline
 
 
 class EnterpriseWorkflow:
-    """Route enterprise questions to SQL, RAG, or both."""
+    """Route enterprise questions to general conversation, SQL, RAG, or both."""
 
     def __init__(self, rag_service: RAGService | None = None):
         self.router = QueryRouter()
         self.sql_pipelines: dict[str, SQLPipeline] = {}
         self.checkpointer = MemorySaver()
-
-        # Inject a service in tests, or initialize the real pipeline
-        # lazily when the first document question arrives.
         self._rag_service = rag_service
 
         builder = StateGraph(WorkflowState)
         builder.add_node("route", self.route_node)
+        builder.add_node("general", self.general_node)
         builder.add_node("sql", self.sql_node)
         builder.add_node("rag", self.rag_node)
         builder.add_node("hybrid", self.hybrid_node)
@@ -43,17 +41,23 @@ class EnterpriseWorkflow:
             "route",
             self.select_route,
             {
+                "general": "general",
                 "sql": "sql",
                 "rag": "rag",
                 "hybrid": "hybrid",
             },
         )
 
+        builder.add_edge("general", END)
         builder.add_edge("sql", END)
         builder.add_edge("rag", END)
         builder.add_edge("hybrid", END)
 
         self.graph = builder.compile(checkpointer=self.checkpointer)
+
+    def refresh_documents(self) -> None:
+        """Invalidate the cached RAG service after documents change."""
+        self._rag_service = None
 
     def _get_sql_pipeline(self, thread_id: str) -> SQLPipeline:
         if thread_id not in self.sql_pipelines:
@@ -73,6 +77,7 @@ class EnterpriseWorkflow:
         loader = DocumentLoader()
         chunker = TextChunker()
         all_chunks: list[Document] = []
+
         files = sorted(
             path
             for path in documents_dir.rglob("*")
@@ -97,8 +102,6 @@ class EnterpriseWorkflow:
                 loaded = loader.load_file(path)
                 chunks = chunker.split_documents(loaded)
 
-                # Use a stable relative path so filenames in different
-                # subdirectories do not overwrite each other.
                 for chunk in chunks:
                     chunk.metadata["source"] = source
 
@@ -130,10 +133,10 @@ class EnterpriseWorkflow:
                     llm=OllamaClient(),
                 ),
             )
+
             return self._rag_service
 
         except Exception:
-            # Do not leave open Chroma handles if initialization fails.
             vector_store.store = None
             vector_store.embeddings = None
             raise
@@ -141,18 +144,63 @@ class EnterpriseWorkflow:
     def route_node(self, state: WorkflowState) -> dict[str, Any]:
         question = state["question"]
         thread_id = state["thread_id"]
+
+        route = self.router.route(question)
+
+        # Ordinary conversation must not trigger SQL or RAG initialization.
+        if route == "general":
+            return {"route": "general"}
+
         pipeline = self._get_sql_pipeline(thread_id)
 
         # Preserve an outstanding SQL clarification across turns.
         if pipeline.conversation_state.status == "awaiting_clarification":
             route = "sql"
-        else:
-            route = self.router.route(question)
 
         return {"route": route}
 
     def select_route(self, state: WorkflowState) -> str:
         return state["route"]
+
+    def general_node(self, state: WorkflowState) -> dict[str, Any]:
+        """Respond to greetings and unsupported or ambiguous requests safely."""
+        normalized = " ".join(
+            state["question"].casefold().strip(" \t!.,?").split()
+        )
+
+        if normalized in {
+            "hi",
+            "hello",
+            "hey",
+            "hi there",
+            "hello there",
+            "good morning",
+            "good afternoon",
+            "good evening",
+        }:
+            answer = (
+                "Hi! I can help you search uploaded documents and answer "
+                "questions about enterprise database records. What would "
+                "you like to know?"
+            )
+        elif normalized in {"thanks", "thank you"}:
+            answer = "You're welcome! What would you like to explore next?"
+        elif normalized in {"bye", "goodbye"}:
+            answer = "Goodbye! Come back whenever you need help."
+        else:
+            answer = (
+                "I can help with uploaded documents and enterprise database "
+                "questions. Please mention the document, resume, customer, "
+                "order, or information you're looking for."
+            )
+
+        return {
+            "answer": answer,
+            "result": {
+                "status": "success",
+                "route": "general",
+            },
+        }
 
     def sql_node(self, state: WorkflowState) -> dict[str, Any]:
         pipeline = self._get_sql_pipeline(state["thread_id"])
@@ -190,7 +238,11 @@ class EnterpriseWorkflow:
             answer_result = self._get_rag_service().ask(state["question"])
 
             result = {
-                "status": "success" if answer_result.sources else "insufficient_evidence",
+                "status": (
+                    "success"
+                    if answer_result.sources
+                    else "insufficient_evidence"
+                ),
                 "route": "rag",
                 "sources": answer_result.sources,
                 "citation_ids": answer_result.citation_ids,
@@ -214,12 +266,12 @@ class EnterpriseWorkflow:
 
     def hybrid_node(self, state: WorkflowState) -> dict[str, Any]:
         question = state["question"]
-        sql_part: dict[str, Any]
-        rag_part: dict[str, Any]
 
-        # Execute structured-data and document retrieval independently.
         try:
-            sql_result = self._get_sql_pipeline(state["thread_id"]).run(question)
+            sql_result = self._get_sql_pipeline(
+                state["thread_id"]
+            ).run(question)
+
             if sql_result["status"] == "success":
                 sql_answer = self._format_sql_result(sql_result)
             elif sql_result["status"] in {
@@ -235,6 +287,7 @@ class EnterpriseWorkflow:
                 "answer": sql_answer,
                 "result": sql_result,
             }
+
         except Exception:
             sql_part = {
                 "status": "error",
@@ -244,14 +297,18 @@ class EnterpriseWorkflow:
 
         try:
             answer_result = self._get_rag_service().ask(question)
+
             rag_part = {
                 "status": (
-                    "success" if answer_result.sources else "insufficient_evidence"
+                    "success"
+                    if answer_result.sources
+                    else "insufficient_evidence"
                 ),
                 "answer": answer_result.answer,
                 "sources": answer_result.sources,
                 "citation_ids": answer_result.citation_ids,
             }
+
         except Exception:
             rag_part = {
                 "status": "error",
@@ -285,12 +342,14 @@ class EnterpriseWorkflow:
     @staticmethod
     def _format_sql_result(result: dict[str, Any]) -> str:
         rows = result.get("results", [])
+
         if not rows:
             return "The query completed successfully, but no records matched."
 
         formatted_rows = "\n".join(str(row) for row in rows)
+
         return (
-            f"Query completed successfully.\n\n"
+            "Query completed successfully.\n\n"
             f"SQL:\n{result['sql']}\n\n"
             f"Results:\n{formatted_rows}"
         )
@@ -301,6 +360,7 @@ class EnterpriseWorkflow:
         thread_id: str = "default",
     ) -> dict[str, Any]:
         question = question.strip()
+
         if not question:
             return {
                 "answer": "Please enter a question.",
