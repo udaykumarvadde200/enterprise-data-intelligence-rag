@@ -1,22 +1,25 @@
 from langchain_core.documents import Document
 
 from app.rag.context_filter import ContextFilter
-from app.rag.reranker import CrossEncoderReranker
+from app.rag.hybrid_retriever import HybridRetriever
+from app.rag.ollama_reranker import OllamaRelevanceReranker
 
 
 class RetrievalPipeline:
-    """Hybrid retrieval followed by reranking and context filtering."""
+    """Retrieve, rerank, and filter relevant document chunks."""
 
     def __init__(
         self,
-        hybrid_retriever,
-        reranker: CrossEncoderReranker,
+        hybrid_retriever: HybridRetriever,
+        reranker: OllamaRelevanceReranker,
         context_filter: ContextFilter | None = None,
         candidate_k: int = 10,
         rerank_k: int = 5,
     ) -> None:
-        if candidate_k <= 0 or rerank_k <= 0:
-            raise ValueError("Retrieval candidate counts must be positive.")
+        if candidate_k <= 0:
+            raise ValueError("candidate_k must be greater than zero.")
+        if rerank_k <= 0:
+            raise ValueError("rerank_k must be greater than zero.")
 
         self.hybrid_retriever = hybrid_retriever
         self.reranker = reranker
@@ -32,6 +35,9 @@ class RetrievalPipeline:
             query,
             top_k=self.candidate_k,
         )
+
+        if not candidates:
+            return []
 
         reranked = self.reranker.rerank(
             query,
