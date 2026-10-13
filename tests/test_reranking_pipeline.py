@@ -27,6 +27,13 @@ class FakeHybridRetriever:
         self.last_top_k = top_k
         return self.documents[:top_k]
 
+class FakeQueryGenerator:
+    def __init__(self, queries=None):
+        self.queries = queries
+
+    def generate(self, question):
+        return self.queries or [question]
+
 
 def test_reranker_orders_documents_by_score():
     documents = [doc("First"), doc("Second"), doc("Third")]
@@ -121,6 +128,7 @@ def test_pipeline_connects_retrieval_reranking_and_filtering():
         context_filter=ContextFilter(max_chunks=2),
         candidate_k=3,
         rerank_k=3,
+	query_generator=FakeQueryGenerator(),
     )
 
     results = pipeline.search("test query")
