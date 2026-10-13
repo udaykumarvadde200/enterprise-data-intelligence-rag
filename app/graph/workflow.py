@@ -19,7 +19,7 @@ from app.rag.rag_service import RAGService
 from app.rag.retrieval_pipeline import RetrievalPipeline
 from app.rag.vector_store import ChromaVectorStore
 from app.sql.sql_pipeline import SQLPipeline
-
+from app.rag.query_rewriter import QueryRewriter
 
 class EnterpriseWorkflow:
     """Route enterprise questions to general conversation, SQL, RAG, or both."""
@@ -34,6 +34,7 @@ class EnterpriseWorkflow:
         self.checkpointer = MemorySaver()
         self._rag_service = rag_service
         self.long_term_memory = long_term_memory or LongTermMemory()
+        self.query_rewriter = QueryRewriter()
 
         builder = StateGraph(WorkflowState)
 
@@ -154,41 +155,49 @@ class EnterpriseWorkflow:
             vector_store.embeddings = None
             raise
 
+   
     def route_node(self, state: WorkflowState) -> dict[str, Any]:
-        """Retrieve user-specific memories and select a processing route."""
+        """Rewrite follow-ups, retrieve memories, and select a route."""
         question = state["question"]
         thread_id = state["thread_id"]
         user_id = state.get("user_id", "local-user")
+        history = state.get("conversation_history", [])
+
+        rewritten_question = self.query_rewriter.rewrite(
+            question,
+            history,
+        )
 
         try:
             memories = self.long_term_memory.search(
                 user_id=user_id,
-                query_text=question,
+                query_text=rewritten_question,
                 limit=5,
             )
         except Exception:
-            # Memory is supplementary; failures must not break SQL or RAG.
             memories = []
 
-        route = self.router.route(question)
+        route = self.router.route(rewritten_question)
 
-        # Ordinary conversation must not trigger SQL or RAG initialization.
         if route == "general":
             return {
                 "route": "general",
                 "memories": memories,
+                "rewritten_question": rewritten_question,
             }
 
         pipeline = self._get_sql_pipeline(thread_id)
 
-        # Preserve an outstanding SQL clarification across turns.
+        # Preserve an outstanding SQL clarification.
         if pipeline.conversation_state.status == "awaiting_clarification":
             route = "sql"
 
         return {
             "route": route,
             "memories": memories,
+            "rewritten_question": rewritten_question,
         }
+
 
     def select_route(self, state: WorkflowState) -> str:
         return state["route"]
@@ -293,7 +302,9 @@ class EnterpriseWorkflow:
         pipeline = self._get_sql_pipeline(state["thread_id"])
 
         try:
-            result = pipeline.run(state["question"])
+            result = pipeline.run(
+            state.get("rewritten_question") or state["question"]
+        )
 
             if result["status"] in {"clarification_required", "not_found"}:
                 answer = result["message"]
@@ -322,7 +333,9 @@ class EnterpriseWorkflow:
 
     def rag_node(self, state: WorkflowState) -> dict[str, Any]:
         try:
-            answer_result = self._get_rag_service().ask(state["question"])
+            answer_result = self._get_rag_service().ask(
+            state.get("rewritten_question") or state["question"]
+            )
 
             result = {
                 "status": (
@@ -352,7 +365,7 @@ class EnterpriseWorkflow:
             }
 
     def hybrid_node(self, state: WorkflowState) -> dict[str, Any]:
-        question = state["question"]
+        question = state.get("rewritten_question") or state["question"]
 
         try:
             sql_result = self._get_sql_pipeline(

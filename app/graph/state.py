@@ -11,3 +11,4 @@ class WorkflowState(TypedDict, total=False):
     answer: str
     result: dict[str, Any]
     error: str
+    rewritten_question: str
