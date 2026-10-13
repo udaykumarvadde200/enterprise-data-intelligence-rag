@@ -1,4 +1,3 @@
-
 from pathlib import Path
 from typing import Any
 
@@ -37,13 +36,18 @@ class EnterpriseWorkflow:
         self.long_term_memory = long_term_memory or LongTermMemory()
 
         builder = StateGraph(WorkflowState)
+
+        # Register every graph node.
         builder.add_node("route", self.route_node)
         builder.add_node("general", self.general_node)
         builder.add_node("sql", self.sql_node)
         builder.add_node("rag", self.rag_node)
         builder.add_node("hybrid", self.hybrid_node)
+        builder.add_node("record_turn", self.record_turn_node)
 
+        # Start by routing the user's question.
         builder.add_edge(START, "route")
+
         builder.add_conditional_edges(
             "route",
             self.select_route,
@@ -55,10 +59,12 @@ class EnterpriseWorkflow:
             },
         )
 
-        builder.add_edge("general", END)
-        builder.add_edge("sql", END)
-        builder.add_edge("rag", END)
-        builder.add_edge("hybrid", END)
+        # Record the result of every route before ending the turn.
+        builder.add_edge("general", "record_turn")
+        builder.add_edge("sql", "record_turn")
+        builder.add_edge("rag", "record_turn")
+        builder.add_edge("hybrid", "record_turn")
+        builder.add_edge("record_turn", END)
 
         self.graph = builder.compile(checkpointer=self.checkpointer)
 
@@ -187,6 +193,19 @@ class EnterpriseWorkflow:
     def select_route(self, state: WorkflowState) -> str:
         return state["route"]
 
+    def record_turn_node(self, state: WorkflowState) -> dict[str, Any]:
+        """Persist the latest turn in checkpointed conversation state."""
+        history = list(state.get("conversation_history", []))
+
+        history.append(
+            {
+                "question": state.get("question", ""),
+                "answer": state.get("answer", ""),
+            }
+        )
+
+        return {"conversation_history": history[-10:]}
+
     def general_node(self, state: WorkflowState) -> dict[str, Any]:
         """Respond to general requests using relevant saved user context."""
         normalized = " ".join(
@@ -213,9 +232,11 @@ class EnterpriseWorkflow:
         elif normalized in {"bye", "goodbye"}:
             answer = "Goodbye! Come back whenever you need help."
         else:
-            memories = state.get("memories", [])
 
-            if not memories:
+            memories = state.get("memories", [])
+            history = state.get("conversation_history", [])
+
+            if not memories and not history:
                 answer = (
                     "I can help with uploaded documents and enterprise database "
                     "questions. Please mention the document, resume, customer, "
@@ -225,19 +246,29 @@ class EnterpriseWorkflow:
                 memory_context = "\n".join(
                     f"- {item['memory_key']}: {item['memory_value']}"
                     for item in memories
-                )
+                ) or "(No saved memories retrieved.)"
+
+                recent_history = history[-10:]
+                history_context = "\n".join(
+                    f"User: {turn['question']}\n"
+                    f"Assistant: {turn['answer']}"
+                    for turn in recent_history
+                ) or "(No previous conversation turns.)"
 
                 try:
                     llm = OllamaClient().get_chat_model()
                     response = llm.invoke(
                         "You are an assistant for an enterprise knowledge "
                         "platform. Answer the user's general question clearly. "
-                        "Use saved context only when relevant. Saved memories "
-                        "are not verified evidence about enterprise records "
-                        "or documents. Never claim to have queried a database "
-                        "or searched documents unless that actually occurred.\n\n"
+                        "Use recent conversation history to understand follow-up "
+                        "questions and saved memories when relevant. Treat both "
+                        "as context, not verified evidence about enterprise "
+                        "records or documents. Never claim to have queried a "
+                        "database or searched documents unless that actually "
+                        "occurred.\n\n"
+                        f"Recent conversation:\n{history_context}\n\n"
                         f"Saved user context:\n{memory_context}\n\n"
-                        f"User question:\n{state['question']}"
+                        f"Current user question:\n{state['question']}"
                     )
                     answer = (
                         response.content
