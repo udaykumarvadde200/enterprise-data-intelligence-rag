@@ -1,4 +1,5 @@
-﻿from pathlib import Path
+
+from pathlib import Path
 from typing import Any
 
 from langchain_core.documents import Document
@@ -10,6 +11,7 @@ from app.graph.state import WorkflowState
 from app.ingestion.document_loader import DocumentLoader
 from app.ingestion.text_splitter import TextChunker
 from app.llm.ollama_client import OllamaClient
+from app.memory.long_term_memory import LongTermMemory
 from app.rag.answer_generator import GroundedAnswerGenerator
 from app.rag.context_filter import ContextFilter
 from app.rag.hybrid_retriever import HybridRetriever
@@ -23,11 +25,16 @@ from app.sql.sql_pipeline import SQLPipeline
 class EnterpriseWorkflow:
     """Route enterprise questions to general conversation, SQL, RAG, or both."""
 
-    def __init__(self, rag_service: RAGService | None = None):
+    def __init__(
+        self,
+        rag_service: RAGService | None = None,
+        long_term_memory: LongTermMemory | None = None,
+    ):
         self.router = QueryRouter()
         self.sql_pipelines: dict[str, SQLPipeline] = {}
         self.checkpointer = MemorySaver()
         self._rag_service = rag_service
+        self.long_term_memory = long_term_memory or LongTermMemory()
 
         builder = StateGraph(WorkflowState)
         builder.add_node("route", self.route_node)
@@ -142,14 +149,29 @@ class EnterpriseWorkflow:
             raise
 
     def route_node(self, state: WorkflowState) -> dict[str, Any]:
+        """Retrieve user-specific memories and select a processing route."""
         question = state["question"]
         thread_id = state["thread_id"]
+        user_id = state.get("user_id", "local-user")
+
+        try:
+            memories = self.long_term_memory.search(
+                user_id=user_id,
+                query_text=question,
+                limit=5,
+            )
+        except Exception:
+            # Memory is supplementary; failures must not break SQL or RAG.
+            memories = []
 
         route = self.router.route(question)
 
         # Ordinary conversation must not trigger SQL or RAG initialization.
         if route == "general":
-            return {"route": "general"}
+            return {
+                "route": "general",
+                "memories": memories,
+            }
 
         pipeline = self._get_sql_pipeline(thread_id)
 
@@ -157,13 +179,16 @@ class EnterpriseWorkflow:
         if pipeline.conversation_state.status == "awaiting_clarification":
             route = "sql"
 
-        return {"route": route}
+        return {
+            "route": route,
+            "memories": memories,
+        }
 
     def select_route(self, state: WorkflowState) -> str:
         return state["route"]
 
     def general_node(self, state: WorkflowState) -> dict[str, Any]:
-        """Respond to greetings and unsupported or ambiguous requests safely."""
+        """Respond to general requests using relevant saved user context."""
         normalized = " ".join(
             state["question"].casefold().strip(" \t!.,?").split()
         )
@@ -188,11 +213,42 @@ class EnterpriseWorkflow:
         elif normalized in {"bye", "goodbye"}:
             answer = "Goodbye! Come back whenever you need help."
         else:
-            answer = (
-                "I can help with uploaded documents and enterprise database "
-                "questions. Please mention the document, resume, customer, "
-                "order, or information you're looking for."
-            )
+            memories = state.get("memories", [])
+
+            if not memories:
+                answer = (
+                    "I can help with uploaded documents and enterprise database "
+                    "questions. Please mention the document, resume, customer, "
+                    "order, or information you're looking for."
+                )
+            else:
+                memory_context = "\n".join(
+                    f"- {item['memory_key']}: {item['memory_value']}"
+                    for item in memories
+                )
+
+                try:
+                    llm = OllamaClient().get_chat_model()
+                    response = llm.invoke(
+                        "You are an assistant for an enterprise knowledge "
+                        "platform. Answer the user's general question clearly. "
+                        "Use saved context only when relevant. Saved memories "
+                        "are not verified evidence about enterprise records "
+                        "or documents. Never claim to have queried a database "
+                        "or searched documents unless that actually occurred.\n\n"
+                        f"Saved user context:\n{memory_context}\n\n"
+                        f"User question:\n{state['question']}"
+                    )
+                    answer = (
+                        response.content
+                        if hasattr(response, "content")
+                        else str(response)
+                    )
+                except Exception:
+                    answer = (
+                        "I can help with uploaded documents and enterprise "
+                        "database questions. Please tell me what you need."
+                    )
 
         return {
             "answer": answer,
@@ -358,8 +414,12 @@ class EnterpriseWorkflow:
         self,
         question: str,
         thread_id: str = "default",
+        user_id: str = "local-user",
     ) -> dict[str, Any]:
+        """Run the workflow with conversation and user-specific memory."""
         question = question.strip()
+        thread_id = thread_id.strip()
+        user_id = user_id.strip()
 
         if not question:
             return {
@@ -367,12 +427,22 @@ class EnterpriseWorkflow:
                 "error": "Empty question.",
             }
 
+        if not thread_id or not user_id:
+            return {
+                "answer": "A valid thread ID and user ID are required.",
+                "error": "Empty thread ID or user ID.",
+            }
+
         state: WorkflowState = {
             "question": question,
             "thread_id": thread_id,
+            "user_id": user_id,
         }
+
+        # Keep checkpointed conversation state separate by user.
+        conversation_id = f"{user_id}:{thread_id}"
 
         return self.graph.invoke(
             state,
-            config={"configurable": {"thread_id": thread_id}},
+            config={"configurable": {"thread_id": conversation_id}},
         )

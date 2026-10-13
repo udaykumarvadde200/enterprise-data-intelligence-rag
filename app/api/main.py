@@ -22,10 +22,12 @@ SUPPORTED_EXTENSIONS = DocumentLoader.SUPPORTED_EXTENSIONS
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MiB
 
 
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     thread_id: str = Field(default="default", min_length=1, max_length=128)
-
+    user_id: str = Field(default="local-user", min_length=1, max_length=128)
 
 class AskResponse(BaseModel):
     answer: str
@@ -49,16 +51,26 @@ def ask(request: AskRequest) -> AskResponse:
     """Route a question to SQL, document RAG, or both."""
     question = request.question.strip()
     thread_id = request.thread_id.strip()
+    user_id = request.user_id.strip()
 
     if not question:
         raise HTTPException(status_code=422, detail="Question must not be empty.")
 
     if not thread_id:
         raise HTTPException(status_code=422, detail="Thread ID must not be empty.")
+    if not user_id:
+        raise HTTPException(
+            status_code=422,
+            detail="User ID must not be empty.",
+        )
 
     try:
         with workflow_lock:
-            output = workflow.ask(question, thread_id=thread_id)
+            output = workflow.ask(
+                question,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
 
         return AskResponse(
             answer=output.get("answer", "No answer was returned."),

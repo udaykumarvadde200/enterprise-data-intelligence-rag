@@ -7,7 +7,7 @@ class FakeWorkflow:
     def __init__(self):
         self.refreshed = False
 
-    def ask(self, question: str, thread_id: str = "default"):
+    def ask(self,question: str,thread_id: str = "default",user_id: str = "local-user",):
         return {
             "answer": f"Processed: {question}",
             "result": {"status": "success", "route": "rag"},
