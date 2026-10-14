@@ -1,0 +1,18 @@
+﻿[
+  {
+    "id": "security_policy",
+    "content": "Customer Security Policy: Protect customer accounts with strong authentication. Restrict access to authorized employees. Report security incidents immediately. Encrypt sensitive customer records and review access permissions regularly."
+  },
+  {
+    "id": "confidentiality_policy",
+    "content": "Confidentiality Policy: Handle confidential customer information carefully. Never disclose private customer information to unauthorized people. Store confidential records securely and share information only with approved recipients for legitimate business purposes."
+  },
+  {
+    "id": "leave_policy",
+    "content": "Employee Leave Policy: Employees may request annual leave through the employee leave portal. Submit leave requests to the manager in advance and wait for approval before taking leave. Leave balances and approvals are maintained in the HR system."
+  },
+  {
+    "id": "remote_work_policy",
+    "content": "Remote Work Policy: Employees working remotely must use approved devices, protect company information, follow access-control requirements, and report technical or security incidents to the IT team."
+  }
+]

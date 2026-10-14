@@ -1,0 +1,22 @@
+﻿[
+  {
+    "query": "What is the customer security policy?",
+    "relevant_ids": ["security_policy"]
+  },
+  {
+    "query": "How should confidential customer information be handled?",
+    "relevant_ids": ["security_policy", "confidentiality_policy"]
+  },
+  {
+    "query": "What is the employee leave policy?",
+    "relevant_ids": ["leave_policy"]
+  },
+  {
+    "query": "How can employees request annual leave?",
+    "relevant_ids": ["leave_policy"]
+  },
+  {
+    "query": "What are the rules for protecting private information?",
+    "relevant_ids": ["confidentiality_policy", "security_policy"]
+  }
+]
