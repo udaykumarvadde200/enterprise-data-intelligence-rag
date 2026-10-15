@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from langchain_core.documents import Document
@@ -65,8 +65,24 @@ def main() -> None:
                 print(f"Source: {document.metadata.get('source')}")
                 print(f"Content: {document.page_content}")
 
+            if not results:
+                raise RuntimeError("Hybrid retrieval returned no results.")
+
+            if results[0].metadata.get("source") != "security_policy.txt":
+                raise RuntimeError(
+                    "Expected the security policy to rank first."
+                )
+
+            print("\nPASS: Hybrid retrieval smoke test completed.")
+
         finally:
-            # Release ChromaDB's persistent client before directory cleanup.
+            store = vector_store.store
+            client = getattr(store, "_client", None) if store else None
+            system = getattr(client, "_system", None) if client else None
+
+            if system is not None:
+                system.stop()
+
             vector_store.store = None
             vector_store.embeddings = None
 

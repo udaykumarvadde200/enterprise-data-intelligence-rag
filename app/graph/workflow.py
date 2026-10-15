@@ -301,10 +301,14 @@ class EnterpriseWorkflow:
     def sql_node(self, state: WorkflowState) -> dict[str, Any]:
         pipeline = self._get_sql_pipeline(state["thread_id"])
 
+        # Clarification replies must be passed exactly as the user typed them.
+        if pipeline.conversation_state.status == "awaiting_clarification":
+            question = state["question"]
+        else:
+            question = state.get("rewritten_question") or state["question"]
+
         try:
-            result = pipeline.run(
-            state.get("rewritten_question") or state["question"]
-        )
+            result = pipeline.run(question)
 
             if result["status"] in {"clarification_required", "not_found"}:
                 answer = result["message"]

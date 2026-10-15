@@ -13,12 +13,11 @@ def main() -> None:
     documents = [
         Document(
             page_content=(
-                "Employees must protect confidential customer "
-                "information and personal data. Access should be "
-                "limited to authorized personnel."
+        "Employees must protect confidential customer "
+        "information and personal data."
             ),
-            metadata={"file_type": "txt", "source": "security_policy.txt"},
-        ),
+                metadata={"file_type": "txt", "source": "security_policy.txt"},
+            ),
         Document(
             page_content=(
                 "Passwords must be strong, unique, and never shared "
@@ -95,13 +94,20 @@ def main() -> None:
         if not result.sources:
             raise RuntimeError("RAG returned no source information.")
 
-        if result.citation_ids:
-            print("\nPASS: End-to-end RAG smoke test completed.")
-        else:
-            print(
-                "\nWARNING: No valid citation IDs were recognized. "
-                "Inspect the generated answer."
+
+        if not result.citation_ids:
+            raise RuntimeError(
+                "RAG answer contains no recognized citation IDs."
             )
+
+        unsupported_claim = "access should be limited to authorized personnel"
+
+        if unsupported_claim in result.answer.lower():
+            raise RuntimeError(
+                "RAG returned an unsupported security-policy claim."
+            )
+
+        print("\nPASS: End-to-end RAG smoke test completed.")
 
     finally:
         vector_store.store = None

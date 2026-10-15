@@ -1,5 +1,6 @@
 import sqlglot
 from sqlglot import exp
+from sqlglot.optimizer.scope import traverse_scope
 
 
 class SQLValidator:
@@ -26,54 +27,100 @@ class SQLValidator:
             _default,
             _position,
         ) in schema["columns"]:
-
             valid_schema.setdefault(table_name, set()).add(column_name)
 
-        query_tables = {}
+        for scope in traverse_scope(parsed_sql):
+            sources = scope.sources
 
-        for table in parsed_sql.find_all(exp.Table):
-            table_name = table.name
-            alias = table.alias_or_name
+            # Validate every real table used by this query scope.
+            for source in sources.values():
+                if isinstance(source, exp.Table):
+                    if source.name not in valid_schema:
+                        return False
 
-            if table_name not in valid_schema:
-                return False
+            # Validate only columns belonging to this SELECT,
+            # excluding columns inside nested SELECT expressions.
+            for column in (
+                column
+                for column in scope.expression.find_all(exp.Column)
+                if column.find_ancestor(exp.Select) is scope.expression
+            ):
+                if column.name == "*":
+                    continue
 
-            query_tables[alias] = table_name
-        
-        for column in parsed_sql.find_all(exp.Column):
-            if column.name == "*":
-                continue
-            column_name = column.name
-            table_reference = column.table
+                column_name = column.name
+                table_reference = column.table
 
-            if table_reference:
-                if table_reference not in query_tables:
-                    return False
+                if table_reference:
+                    source = sources.get(table_reference)
 
-                real_table = query_tables[table_reference]
+                    if source is None:
+                        return False
 
-                if column_name not in valid_schema[real_table]:
-                    return False
+                    if isinstance(source, exp.Table):
+                        if column_name not in valid_schema.get(
+                            source.name, set()
+                        ):
+                            return False
 
-            else:
-                matching_tables = [
-                    table_name
-                    for table_name in query_tables.values()
-                    if column_name in valid_schema[table_name]
-                ]
+                    elif isinstance(source, type(scope)):
+                        # CTE or derived-table source.
+                        output_columns = {
+                            item.alias_or_name
+                            for item in source.expression.selects
+                        }
+                        if column_name not in output_columns:
+                            return False
+                    else:
+                        return False
 
-                if not matching_tables:
-                    return False
+                else:
+                    matching_sources = []
 
-                if len(set(matching_tables)) > 1:
-                    return False
+                    for source in sources.values():
+                        if isinstance(source, exp.Table):
+                            if column_name in valid_schema.get(
+                                source.name, set()
+                            ):
+                                matching_sources.append(source.name)
+
+                        elif isinstance(source, type(scope)):
+                            output_columns = {
+                                item.alias_or_name
+                                for item in source.expression.selects
+                            }
+                            if column_name in output_columns:
+                                matching_sources.append(source)
+
+                    # Reject missing or ambiguous unqualified columns.
+                    if len(matching_sources) != 1:
+                        return False
 
         return True
 
+
     def validate_read_only(self, sql: str) -> bool:
         try:
-            parsed_sql = sqlglot.parse_one(sql, dialect="postgres")
+            statements = sqlglot.parse(sql, dialect="postgres")
         except sqlglot.errors.ParseError:
             return False
 
-        return isinstance(parsed_sql, exp.Select)
+        # Require exactly one non-empty SQL statement.
+        if len(statements) != 1:
+            return False
+
+        parsed_sql = statements[0]
+
+        # Only ordinary SELECT queries are allowed.
+        if not isinstance(parsed_sql, exp.Select):
+            return False
+
+        # SELECT INTO creates a table; reject it.
+        if parsed_sql.args.get("into") is not None:
+            return False
+
+        # Reject row-locking clauses such as FOR UPDATE.
+        if parsed_sql.args.get("locks"):
+            return False
+
+        return True

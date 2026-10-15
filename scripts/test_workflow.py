@@ -45,14 +45,17 @@ third = ask("The Bangalore one.")
 assert third.get("route") == "sql"
 assert third.get("result", {}).get("status") == "success"
 
-customer_ids = {
-    row[1]
-    for row in third["result"]["results"]
-}
+sql = third["result"]["sql"].lower()
 
-assert customer_ids == {4}, (
-    f"Expected only customer_id 4, got {customer_ids}"
+assert "customer_id = 4" in sql, (
+    f"Expected SQL to enforce customer_id = 4, got: {sql}"
 )
+
+products = {row[2] for row in third["result"]["results"]}
+assert products == {
+    "Dell XPS 15",
+    "Logitech MX Master 3S",
+}, f"Unexpected products returned: {products}"
 
 assert len(third["result"]["results"]) == 2
 
