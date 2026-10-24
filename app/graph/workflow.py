@@ -146,6 +146,7 @@ class EnterpriseWorkflow:
     context_filter=ContextFilter(
         max_chunks=5,
         max_characters=6000,
+        min_score=-10.0,
     ),
     candidate_k=10,
     rerank_k=5,
