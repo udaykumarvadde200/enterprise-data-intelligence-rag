@@ -2,6 +2,13 @@ from fastapi.testclient import TestClient
 
 from app.api import main
 
+import asyncio
+from unittest.mock import patch
+
+import pytest
+
+from app.api.main import lifespan, workflow
+
 
 class FakeWorkflow:
     def __init__(self):
@@ -182,3 +189,29 @@ def test_upload_sanitizes_filename(tmp_path, monkeypatch):
     assert response.json()["filename"] == "customers.csv"
     assert (tmp_path / "customers.csv").is_file()
     assert not (tmp_path / "nested" / "customers.csv").exists()
+
+
+
+
+
+
+
+
+
+
+
+def test_api_startup_fails_when_memory_initialization_fails():
+    async def run_test():
+        with patch.object(
+            workflow.long_term_memory,
+            "initialize",
+            side_effect=RuntimeError("PostgreSQL unavailable"),
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match="PostgreSQL unavailable",
+            ):
+                async with lifespan(None):
+                    pytest.fail("API startup should not continue")
+
+    asyncio.run(run_test())

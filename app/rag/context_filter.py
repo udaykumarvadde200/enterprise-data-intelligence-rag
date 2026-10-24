@@ -27,12 +27,8 @@ class ContextFilter:
             if not content:
                 continue
 
-            identity = (
-                document.metadata.get("source", ""),
-                document.metadata.get("page", ""),
-                document.metadata.get("start_index", ""),
-                content,
-            )
+            # Deduplicate identical text regardless of source filename.
+            identity = content
             if identity in seen:
                 continue
             seen.add(identity)
@@ -40,7 +36,7 @@ class ContextFilter:
             if remaining <= 0:
                 break
 
-            # Preserve the context budget even if a single chunk is oversized.
+            # Preserve the context budget even for oversized chunks.
             content = content[:remaining]
             if not content:
                 break

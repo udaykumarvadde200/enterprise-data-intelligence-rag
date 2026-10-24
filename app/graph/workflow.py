@@ -1,3 +1,5 @@
+
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +16,13 @@ from app.memory.long_term_memory import LongTermMemory
 from app.rag.answer_generator import GroundedAnswerGenerator
 from app.rag.context_filter import ContextFilter
 from app.rag.hybrid_retriever import HybridRetriever
-from app.rag.ollama_reranker import OllamaRelevanceReranker
+from app.rag.reranker import CrossEncoderReranker
+from app.rag.query_rewriter import QueryRewriter
 from app.rag.rag_service import RAGService
 from app.rag.retrieval_pipeline import RetrievalPipeline
 from app.rag.vector_store import ChromaVectorStore
 from app.sql.sql_pipeline import SQLPipeline
-from app.rag.query_rewriter import QueryRewriter
+
 
 class EnterpriseWorkflow:
     """Route enterprise questions to general conversation, SQL, RAG, or both."""
@@ -30,7 +33,7 @@ class EnterpriseWorkflow:
         long_term_memory: LongTermMemory | None = None,
     ):
         self.router = QueryRouter()
-        self.sql_pipelines: dict[str, SQLPipeline] = {}
+        self.sql_pipelines: dict[tuple[str, str], SQLPipeline] = {}
         self.checkpointer = MemorySaver()
         self._rag_service = rag_service
         self.long_term_memory = long_term_memory or LongTermMemory()
@@ -38,7 +41,6 @@ class EnterpriseWorkflow:
 
         builder = StateGraph(WorkflowState)
 
-        # Register every graph node.
         builder.add_node("route", self.route_node)
         builder.add_node("general", self.general_node)
         builder.add_node("sql", self.sql_node)
@@ -46,7 +48,6 @@ class EnterpriseWorkflow:
         builder.add_node("hybrid", self.hybrid_node)
         builder.add_node("record_turn", self.record_turn_node)
 
-        # Start by routing the user's question.
         builder.add_edge(START, "route")
 
         builder.add_conditional_edges(
@@ -60,7 +61,6 @@ class EnterpriseWorkflow:
             },
         )
 
-        # Record the result of every route before ending the turn.
         builder.add_edge("general", "record_turn")
         builder.add_edge("sql", "record_turn")
         builder.add_edge("rag", "record_turn")
@@ -73,10 +73,18 @@ class EnterpriseWorkflow:
         """Invalidate the cached RAG service after documents change."""
         self._rag_service = None
 
-    def _get_sql_pipeline(self, thread_id: str) -> SQLPipeline:
-        if thread_id not in self.sql_pipelines:
-            self.sql_pipelines[thread_id] = SQLPipeline()
-        return self.sql_pipelines[thread_id]
+    def _get_sql_pipeline(
+        self,
+        thread_id: str,
+        user_id: str = "local-user",
+    ) -> SQLPipeline:
+        """Return a SQL pipeline isolated by user and conversation."""
+        cache_key = (user_id, thread_id)
+
+        if cache_key not in self.sql_pipelines:
+            self.sql_pipelines[cache_key] = SQLPipeline()
+
+        return self.sql_pipelines[cache_key]
 
     def _get_rag_service(self) -> RAGService:
         if self._rag_service is not None:
@@ -131,15 +139,17 @@ class EnterpriseWorkflow:
             )
 
             retrieval_pipeline = RetrievalPipeline(
-                hybrid_retriever=hybrid_retriever,
-                reranker=OllamaRelevanceReranker(),
-                context_filter=ContextFilter(
-                    max_chunks=5,
-                    max_characters=6000,
-                ),
-                candidate_k=10,
-                rerank_k=5,
-            )
+    	hybrid_retriever=hybrid_retriever,
+    	reranker=CrossEncoderReranker(
+        model_name="cross-encoder/ms-marco-MiniLM-L6-v2",
+    ),
+    context_filter=ContextFilter(
+        max_chunks=5,
+        max_characters=6000,
+    ),
+    candidate_k=10,
+    rerank_k=5,
+)
 
             self._rag_service = RAGService(
                 retrieval_pipeline=retrieval_pipeline,
@@ -155,7 +165,6 @@ class EnterpriseWorkflow:
             vector_store.embeddings = None
             raise
 
-   
     def route_node(self, state: WorkflowState) -> dict[str, Any]:
         """Rewrite follow-ups, retrieve memories, and select a route."""
         question = state["question"]
@@ -186,9 +195,11 @@ class EnterpriseWorkflow:
                 "rewritten_question": rewritten_question,
             }
 
-        pipeline = self._get_sql_pipeline(thread_id)
+        pipeline = self._get_sql_pipeline(
+            thread_id,
+            user_id,
+        )
 
-        # Preserve an outstanding SQL clarification.
         if pipeline.conversation_state.status == "awaiting_clarification":
             route = "sql"
 
@@ -197,7 +208,6 @@ class EnterpriseWorkflow:
             "memories": memories,
             "rewritten_question": rewritten_question,
         }
-
 
     def select_route(self, state: WorkflowState) -> str:
         return state["route"]
@@ -241,7 +251,6 @@ class EnterpriseWorkflow:
         elif normalized in {"bye", "goodbye"}:
             answer = "Goodbye! Come back whenever you need help."
         else:
-
             memories = state.get("memories", [])
             history = state.get("conversation_history", [])
 
@@ -299,9 +308,11 @@ class EnterpriseWorkflow:
         }
 
     def sql_node(self, state: WorkflowState) -> dict[str, Any]:
-        pipeline = self._get_sql_pipeline(state["thread_id"])
+        pipeline = self._get_sql_pipeline(
+            state["thread_id"],
+            state.get("user_id", "local-user"),
+        )
 
-        # Clarification replies must be passed exactly as the user typed them.
         if pipeline.conversation_state.status == "awaiting_clarification":
             question = state["question"]
         else:
@@ -338,7 +349,7 @@ class EnterpriseWorkflow:
     def rag_node(self, state: WorkflowState) -> dict[str, Any]:
         try:
             answer_result = self._get_rag_service().ask(
-            state.get("rewritten_question") or state["question"]
+                state.get("rewritten_question") or state["question"]
             )
 
             result = {
@@ -373,7 +384,8 @@ class EnterpriseWorkflow:
 
         try:
             sql_result = self._get_sql_pipeline(
-                state["thread_id"]
+                state["thread_id"],
+                state.get("user_id", "local-user"),
             ).run(question)
 
             if sql_result["status"] == "success":
@@ -481,13 +493,71 @@ class EnterpriseWorkflow:
                 "error": "Empty thread ID or user ID.",
             }
 
+        remember_prefix = "remember that "
+
+        if question.casefold().startswith(remember_prefix):
+            fact = question[len(remember_prefix):].strip().rstrip(" .")
+
+            if not fact:
+                return {
+                    "answer": "Please tell me what you'd like me to remember.",
+                    "error": "Empty memory.",
+                }
+
+            sensitive_terms = (
+                "password",
+                "api key",
+                "secret key",
+                "access token",
+                "credit card",
+                "social security number",
+            )
+
+            if any(term in fact.casefold() for term in sensitive_terms):
+                return {
+                    "answer": (
+                        "I can't save passwords, keys, tokens, or "
+                        "payment or identity secrets as memories."
+                    ),
+                    "error": "Sensitive memory rejected.",
+                }
+
+            memory_key = (
+                "user_note_"
+                + hashlib.sha256(
+                    fact.casefold().encode("utf-8")
+                ).hexdigest()[:16]
+            )
+
+            try:
+                self.long_term_memory.save(
+                    user_id=user_id,
+                    memory_key=memory_key,
+                    memory_value=fact,
+                )
+            except Exception:
+                return {
+                    "answer": (
+                        "I couldn't save that memory because persistent "
+                        "memory is currently unavailable. Please try again."
+                    ),
+                    "error": "Memory persistence failed.",
+                }
+
+            return {
+                "answer": f"I'll remember that: {fact}",
+                "result": {
+                    "status": "success",
+                    "route": "memory",
+                },
+            }
+
         state: WorkflowState = {
             "question": question,
             "thread_id": thread_id,
             "user_id": user_id,
         }
 
-        # Keep checkpointed conversation state separate by user.
         conversation_id = f"{user_id}:{thread_id}"
 
         return self.graph.invoke(

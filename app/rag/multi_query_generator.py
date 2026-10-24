@@ -7,7 +7,7 @@ class MultiQueryGenerator:
     def __init__(
         self,
         llm_client: OllamaClient | None = None,
-        max_alternatives: int = 3,
+        max_alternatives: int = 0,
     ) -> None:
         if max_alternatives < 0:
             raise ValueError("max_alternatives must not be negative.")

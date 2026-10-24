@@ -1,6 +1,9 @@
+
+from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
 from typing import Any
+import logging
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -8,26 +11,46 @@ from pydantic import BaseModel, Field
 from app.graph.workflow import EnterpriseWorkflow
 from app.ingestion.document_loader import DocumentLoader
 
+
+logger = logging.getLogger(__name__)
+
+workflow = EnterpriseWorkflow()
+workflow_lock = Lock()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize PostgreSQL memory when the API starts."""
+    try:
+        workflow.long_term_memory.initialize()
+    except Exception:
+        logger.exception(
+            "Long-term memory initialization failed. "
+            "API startup aborted."
+        )
+        raise
+
+    yield
+
+
 app = FastAPI(
     title="Enterprise Knowledge Intelligence API",
     description="Ask questions across enterprise documents and structured data.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
-workflow = EnterpriseWorkflow()
-workflow_lock = Lock()
 
 DOCUMENTS_DIR = Path("data/documents")
 SUPPORTED_EXTENSIONS = DocumentLoader.SUPPORTED_EXTENSIONS
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MiB
 
 
-
-
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     thread_id: str = Field(default="default", min_length=1, max_length=128)
     user_id: str = Field(default="local-user", min_length=1, max_length=128)
+
 
 class AskResponse(BaseModel):
     answer: str
@@ -54,10 +77,17 @@ def ask(request: AskRequest) -> AskResponse:
     user_id = request.user_id.strip()
 
     if not question:
-        raise HTTPException(status_code=422, detail="Question must not be empty.")
+        raise HTTPException(
+            status_code=422,
+            detail="Question must not be empty.",
+        )
 
     if not thread_id:
-        raise HTTPException(status_code=422, detail="Thread ID must not be empty.")
+        raise HTTPException(
+            status_code=422,
+            detail="Thread ID must not be empty.",
+        )
+
     if not user_id:
         raise HTTPException(
             status_code=422,
@@ -78,6 +108,7 @@ def ask(request: AskRequest) -> AskResponse:
             error=output.get("error"),
         )
     except Exception as exc:
+        logger.exception("Question processing failed.")
         raise HTTPException(
             status_code=500,
             detail="The question could not be processed.",
@@ -95,29 +126,42 @@ def list_documents() -> dict[str, Any]:
             "size_bytes": path.stat().st_size,
         }
         for path in sorted(DOCUMENTS_DIR.rglob("*"))
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
+        if path.is_file()
+        and path.suffix.lower() in SUPPORTED_EXTENSIONS
     ]
 
     return {"count": len(documents), "documents": documents}
 
 
 @app.post("/documents/upload")
-async def upload_document(file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_document(
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
     """Save a supported document and invalidate the cached RAG service."""
     if not file.filename:
-        raise HTTPException(status_code=400, detail="A filename is required.")
+        raise HTTPException(
+            status_code=400,
+            detail="A filename is required.",
+        )
 
     # Strip Windows- or Unix-style directory components.
     filename = file.filename.replace("\\", "/").split("/")[-1].strip()
 
     if not filename or filename in {".", ".."}:
-        raise HTTPException(status_code=400, detail="Invalid filename.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid filename.",
+        )
 
     extension = Path(filename).suffix.lower()
+
     if extension not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
             status_code=415,
-            detail=f"Unsupported file type. {_supported_extensions_message()}",
+            detail=(
+                "Unsupported file type. "
+                f"{_supported_extensions_message()}"
+            ),
         )
 
     try:
@@ -126,7 +170,10 @@ async def upload_document(file: UploadFile = File(...)) -> dict[str, Any]:
         await file.close()
 
     if not contents:
-        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file is empty.",
+        )
 
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(

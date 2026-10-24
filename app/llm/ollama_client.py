@@ -18,6 +18,10 @@ class OllamaClient:
 
         self.llm = ChatOllama(**options)
 
+    def get_chat_model(self):
+        """Return the underlying LangChain chat model."""
+        return self.llm
+
     def invoke(self, prompt: str) -> str:
         response = self.llm.invoke(prompt)
         return response.content

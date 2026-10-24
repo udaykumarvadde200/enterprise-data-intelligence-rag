@@ -1,20 +1,52 @@
 import sqlglot
 from sqlglot import exp
+from sqlglot.errors import SqlglotError
 from sqlglot.optimizer.scope import traverse_scope
 
 
 class SQLValidator:
+    # Statement types that must never appear anywhere in an accepted query,
+    # including inside CTEs and subqueries (e.g. WITH d AS (DELETE ...)).
+    _WRITE_NODE_NAMES = (
+        "Insert",
+        "Update",
+        "Delete",
+        "Merge",
+        "Create",
+        "Drop",
+        "Alter",
+        "Command",
+        "Copy",
+        "TruncateTable",
+        "Set",
+        "Analyze",
+    )
+    WRITE_NODES = tuple(
+        getattr(exp, name)
+        for name in _WRITE_NODE_NAMES
+        if hasattr(exp, name)
+    )
+
+    # sqlglot parses functions it does not model as exp.Anonymous. Those are
+    # rejected unless allowlisted. This blocks pg_sleep, pg_read_file,
+    # nextval, lo_import, dblink, set_config and similar side-effecting or
+    # file/network-reaching functions.
+    ALLOWED_ANONYMOUS_FUNCTIONS = frozenset({"age"})
+
     def validate_syntax(self, sql: str) -> bool:
         try:
             sqlglot.parse_one(sql, dialect="postgres")
             return True
-        except sqlglot.errors.ParseError:
+        except SqlglotError:
+            # ParseError and TokenError (e.g. prose containing an
+            # apostrophe) must both be reported as invalid SQL.
             return False
 
     def validate_schema(self, sql: str, schema: dict) -> bool:
         try:
             parsed_sql = sqlglot.parse_one(sql, dialect="postgres")
-        except sqlglot.errors.ParseError:
+            scopes = traverse_scope(parsed_sql)
+        except SqlglotError:
             return False
 
         valid_schema = {}
@@ -29,7 +61,7 @@ class SQLValidator:
         ) in schema["columns"]:
             valid_schema.setdefault(table_name, set()).add(column_name)
 
-        for scope in traverse_scope(parsed_sql):
+        for scope in scopes:
             sources = scope.sources
 
             # Validate every real table used by this query scope.
@@ -98,11 +130,10 @@ class SQLValidator:
 
         return True
 
-
     def validate_read_only(self, sql: str) -> bool:
         try:
             statements = sqlglot.parse(sql, dialect="postgres")
-        except sqlglot.errors.ParseError:
+        except SqlglotError:
             return False
 
         # Require exactly one non-empty SQL statement.
@@ -122,5 +153,14 @@ class SQLValidator:
         # Reject row-locking clauses such as FOR UPDATE.
         if parsed_sql.args.get("locks"):
             return False
+
+        # Reject data-modifying statements nested anywhere in the query.
+        if self.WRITE_NODES and parsed_sql.find(*self.WRITE_NODES):
+            return False
+
+        # Reject functions sqlglot does not recognize, unless allowlisted.
+        for function in parsed_sql.find_all(exp.Anonymous):
+            if function.name.lower() not in self.ALLOWED_ANONYMOUS_FUNCTIONS:
+                return False
 
         return True

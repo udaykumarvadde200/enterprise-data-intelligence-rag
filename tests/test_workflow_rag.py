@@ -1,4 +1,5 @@
-﻿from types import SimpleNamespace
+﻿
+from types import SimpleNamespace
 
 from app.graph.workflow import EnterpriseWorkflow
 
@@ -33,11 +34,13 @@ class FakeSQLPipeline:
 def make_workflow(monkeypatch):
     workflow = EnterpriseWorkflow(rag_service=FakeRAGService())
     fake_sql = FakeSQLPipeline()
+
     monkeypatch.setattr(
         workflow,
         "_get_sql_pipeline",
-        lambda thread_id: fake_sql,
+        lambda thread_id, user_id="local-user": fake_sql,
     )
+
     return workflow
 
 

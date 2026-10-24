@@ -1,0 +1,385 @@
+[1mdiff --git a/app/api/main.py b/app/api/main.py[m
+[1mindex 0e26794..3dc263b 100644[m
+[1m--- a/app/api/main.py[m
+[1m+++ b/app/api/main.py[m
+[36m@@ -1,6 +1,9 @@[m
+[32m+[m
+[32m+[m[32mfrom contextlib import asynccontextmanager[m
+ from pathlib import Path[m
+ from threading import Lock[m
+ from typing import Any[m
+[32m+[m[32mimport logging[m
+ [m
+ from fastapi import FastAPI, File, HTTPException, UploadFile[m
+ from pydantic import BaseModel, Field[m
+[36m@@ -8,27 +11,47 @@[m [mfrom pydantic import BaseModel, Field[m
+ from app.graph.workflow import EnterpriseWorkflow[m
+ from app.ingestion.document_loader import DocumentLoader[m
+ [m
+[32m+[m
+[32m+[m[32mlogger = logging.getLogger(__name__)[m
+[32m+[m
+[32m+[m[32mworkflow = EnterpriseWorkflow()[m
+[32m+[m[32mworkflow_lock = Lock()[m
+[32m+[m
+[32m+[m
+[32m+[m[32m@asynccontextmanager[m
+[32m+[m[32masync def lifespan(app: FastAPI):[m
+[32m+[m[32m    """Initialize PostgreSQL memory when the API starts."""[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        workflow.long_term_memory.initialize()[m
+[32m+[m[32m    except Exception:[m
+[32m+[m[32m        logger.exception([m
+[32m+[m[32m            "Long-term memory initialization failed. "[m
+[32m+[m[32m            "API startup aborted."[m
+[32m+[m[32m        )[m
+[32m+[m[32m        raise[m
+[32m+[m
+[32m+[m[32m    yield[m
+[32m+[m
+[32m+[m
+ app = FastAPI([m
+     title="Enterprise Knowledge Intelligence API",[m
+     description="Ask questions across enterprise documents and structured data.",[m
+     version="0.1.0",[m
+[32m+[m[32m    lifespan=lifespan,[m
+ )[m
+ [m
+[31m-workflow = EnterpriseWorkflow()[m
+[31m-workflow_lock = Lock()[m
+ [m
+ DOCUMENTS_DIR = Path("data/documents")[m
+ SUPPORTED_EXTENSIONS = DocumentLoader.SUPPORTED_EXTENSIONS[m
+ MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MiB[m
+ [m
+ [m
+[31m-[m
+[31m-[m
+ class AskRequest(BaseModel):[m
+     question: str = Field(min_length=1, max_length=4000)[m
+     thread_id: str = Field(default="default", min_length=1, max_length=128)[m
+     user_id: str = Field(default="local-user", min_length=1, max_length=128)[m
+ [m
+[32m+[m
+ class AskResponse(BaseModel):[m
+     answer: str[m
+     result: dict[str, Any] = Field(default_factory=dict)[m
+[36m@@ -54,10 +77,17 @@[m [mdef ask(request: AskRequest) -> AskResponse:[m
+     user_id = request.user_id.strip()[m
+ [m
+     if not question:[m
+[31m-        raise HTTPException(status_code=422, detail="Question must not be empty.")[m
+[32m+[m[32m        raise HTTPException([m
+[32m+[m[32m            status_code=422,[m
+[32m+[m[32m            detail="Question must not be empty.",[m
+[32m+[m[32m        )[m
+ [m
+     if not thread_id:[m
+[31m-        raise HTTPException(status_code=422, detail="Thread ID must not be empty.")[m
+[32m+[m[32m        raise HTTPException([m
+[32m+[m[32m            status_code=422,[m
+[32m+[m[32m            detail="Thread ID must not be empty.",[m
+[32m+[m[32m        )[m
+[32m+[m
+     if not user_id:[m
+         raise HTTPException([m
+             status_code=422,[m
+[36m@@ -78,6 +108,7 @@[m [mdef ask(request: AskRequest) -> AskResponse:[m
+             error=output.get("error"),[m
+         )[m
+     except Exception as exc:[m
+[32m+[m[32m        logger.exception("Question processing failed.")[m
+         raise HTTPException([m
+             status_code=500,[m
+             detail="The question could not be processed.",[m
+[36m@@ -95,29 +126,42 @@[m [mdef list_documents() -> dict[str, Any]:[m
+             "size_bytes": path.stat().st_size,[m
+         }[m
+         for path in sorted(DOCUMENTS_DIR.rglob("*"))[m
+[31m-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS[m
+[32m+[m[32m        if path.is_file()[m
+[32m+[m[32m        and path.suffix.lower() in SUPPORTED_EXTENSIONS[m
+     ][m
+ [m
+     return {"count": len(documents), "documents": documents}[m
+ [m
+ [m
+ @app.post("/documents/upload")[m
+[31m-async def upload_document(file: UploadFile = File(...)) -> dict[str, Any]:[m
+[32m+[m[32masync def upload_document([m
+[32m+[m[32m    file: UploadFile = File(...),[m
+[32m+[m[32m) -> dict[str, Any]:[m
+     """Save a supported document and invalidate the cached RAG service."""[m
+     if not file.filename:[m
+[31m-        raise HTTPException(status_code=400, detail="A filename is required.")[m
+[32m+[m[32m        raise HTTPException([m
+[32m+[m[32m            status_code=400,[m
+[32m+[m[32m            detail="A filename is required.",[m
+[32m+[m[32m        )[m
+ [m
+     # Strip Windows- or Unix-style directory components.[m
+     filename = file.filename.replace("\\", "/").split("/")[-1].strip()[m
+ [m
+     if not filename or filename in {".", ".."}:[m
+[31m-        raise HTTPException(status_code=400, detail="Invalid filename.")[m
+[32m+[m[32m        raise HTTPException([m
+[32m+[m[32m            status_code=400,[m
+[32m+[m[32m            detail="Invalid filename.",[m
+[32m+[m[32m        )[m
+ [m
+     extension = Path(filename).suffix.lower()[m
+[32m+[m
+     if extension not in SUPPORTED_EXTENSIONS:[m
+         raise HTTPException([m
+             status_code=415,[m
+[31m-            detail=f"Unsupported file type. {_supported_extensions_message()}",[m
+[32m+[m[32m            detail=([m
+[32m+[m[32m                "Unsupported file type. "[m
+[32m+[m[32m                f"{_supported_extensions_message()}"[m
+[32m+[m[32m            ),[m
+         )[m
+ [m
+     try:[m
+[36m@@ -126,7 +170,10 @@[m [masync def upload_document(file: UploadFile = File(...)) -> dict[str, Any]:[m
+         await file.close()[m
+ [m
+     if not contents:[m
+[31m-        raise HTTPException(status_code=400, detail="The uploaded file is empty.")[m
+[32m+[m[32m        raise HTTPException([m
+[32m+[m[32m            status_code=400,[m
+[32m+[m[32m            detail="The uploaded file is empty.",[m
+[32m+[m[32m        )[m
+ [m
+     if len(contents) > MAX_UPLOAD_BYTES:[m
+         raise HTTPException([m
+[36m@@ -159,4 +206,4 @@[m [masync def upload_document(file: UploadFile = File(...)) -> dict[str, Any]:[m
+             "Saved successfully. The document index will refresh "[m
+             "on the next question."[m
+         ),[m
+[31m-    }[m
+\ No newline at end of file[m
+[32m+[m[32m    }[m
+[1mdiff --git a/app/graph/workflow.py b/app/graph/workflow.py[m
+[1mindex ea3dd4b..c83ad6a 100644[m
+[1m--- a/app/graph/workflow.py[m
+[1m+++ b/app/graph/workflow.py[m
+[36m@@ -1,3 +1,5 @@[m
+[32m+[m
+[32m+[m[32mimport hashlib[m
+ from pathlib import Path[m
+ from typing import Any[m
+ [m
+[36m@@ -15,11 +17,12 @@[m [mfrom app.rag.answer_generator import GroundedAnswerGenerator[m
+ from app.rag.context_filter import ContextFilter[m
+ from app.rag.hybrid_retriever import HybridRetriever[m
+ from app.rag.ollama_reranker import OllamaRelevanceReranker[m
+[32m+[m[32mfrom app.rag.query_rewriter import QueryRewriter[m
+ from app.rag.rag_service import RAGService[m
+ from app.rag.retrieval_pipeline import RetrievalPipeline[m
+ from app.rag.vector_store import ChromaVectorStore[m
+ from app.sql.sql_pipeline import SQLPipeline[m
+[31m-from app.rag.query_rewriter import QueryRewriter[m
+[32m+[m
+ [m
+ class EnterpriseWorkflow:[m
+     """Route enterprise questions to general conversation, SQL, RAG, or both."""[m
+[36m@@ -30,7 +33,7 @@[m [mclass EnterpriseWorkflow:[m
+         long_term_memory: LongTermMemory | None = None,[m
+     ):[m
+         self.router = QueryRouter()[m
+[31m-        self.sql_pipelines: dict[str, SQLPipeline] = {}[m
+[32m+[m[32m        self.sql_pipelines: dict[tuple[str, str], SQLPipeline] = {}[m
+         self.checkpointer = MemorySaver()[m
+         self._rag_service = rag_service[m
+         self.long_term_memory = long_term_memory or LongTermMemory()[m
+[36m@@ -38,7 +41,6 @@[m [mclass EnterpriseWorkflow:[m
+ [m
+         builder = StateGraph(WorkflowState)[m
+ [m
+[31m-        # Register every graph node.[m
+         builder.add_node("route", self.route_node)[m
+         builder.add_node("general", self.general_node)[m
+         builder.add_node("sql", self.sql_node)[m
+[36m@@ -46,7 +48,6 @@[m [mclass EnterpriseWorkflow:[m
+         builder.add_node("hybrid", self.hybrid_node)[m
+         builder.add_node("record_turn", self.record_turn_node)[m
+ [m
+[31m-        # Start by routing the user's question.[m
+         builder.add_edge(START, "route")[m
+ [m
+         builder.add_conditional_edges([m
+[36m@@ -60,7 +61,6 @@[m [mclass EnterpriseWorkflow:[m
+             },[m
+         )[m
+ [m
+[31m-        # Record the result of every route before ending the turn.[m
+         builder.add_edge("general", "record_turn")[m
+         builder.add_edge("sql", "record_turn")[m
+         builder.add_edge("rag", "record_turn")[m
+[36m@@ -73,10 +73,18 @@[m [mclass EnterpriseWorkflow:[m
+         """Invalidate the cached RAG service after documents change."""[m
+         self._rag_service = None[m
+ [m
+[31m-    def _get_sql_pipeline(self, thread_id: str) -> SQLPipeline:[m
+[31m-        if thread_id not in self.sql_pipelines:[m
+[31m-            self.sql_pipelines[thread_id] = SQLPipeline()[m
+[31m-        return self.sql_pipelines[thread_id][m
+[32m+[m[32m    def _get_sql_pipeline([m
+[32m+[m[32m        self,[m
+[32m+[m[32m        thread_id: str,[m
+[32m+[m[32m        user_id: str = "local-user",[m
+[32m+[m[32m    ) -> SQLPipeline:[m
+[32m+[m[32m        """Return a SQL pipeline isolated by user and conversation."""[m
+[32m+[m[32m        cache_key = (user_id, thread_id)[m
+[32m+[m
+[32m+[m[32m        if cache_key not in self.sql_pipelines:[m
+[32m+[m[32m            self.sql_pipelines[cache_key] = SQLPipeline()[m
+[32m+[m
+[32m+[m[32m        return self.sql_pipelines[cache_key][m
+ [m
+     def _get_rag_service(self) -> RAGService:[m
+         if self._rag_service is not None:[m
+[36m@@ -155,7 +163,6 @@[m [mclass EnterpriseWorkflow:[m
+             vector_store.embeddings = None[m
+             raise[m
+ [m
+[31m-   [m
+     def route_node(self, state: WorkflowState) -> dict[str, Any]:[m
+         """Rewrite follow-ups, retrieve memories, and select a route."""[m
+         question = state["question"][m
+[36m@@ -186,9 +193,11 @@[m [mclass EnterpriseWorkflow:[m
+                 "rewritten_question": rewritten_question,[m
+             }[m
+ [m
+[31m-        pipeline = self._get_sql_pipeline(thread_id)[m
+[32m+[m[32m        pipeline = self._get_sql_pipeline([m
+[32m+[m[32m            thread_id,[m
+[32m+[m[32m            user_id,[m
+[32m+[m[32m        )[m
+ [m
+[31m-        # Preserve an outstanding SQL clarification.[m
+         if pipeline.conversation_state.status == "awaiting_clarification":[m
+             route = "sql"[m
+ [m
+[36m@@ -198,7 +207,6 @@[m [mclass EnterpriseWorkflow:[m
+             "rewritten_question": rewritten_question,[m
+         }[m
+ [m
+[31m-[m
+     def select_route(self, state: WorkflowState) -> str:[m
+         return state["route"][m
+ [m
+[36m@@ -241,7 +249,6 @@[m [mclass EnterpriseWorkflow:[m
+         elif normalized in {"bye", "goodbye"}:[m
+             answer = "Goodbye! Come back whenever you need help."[m
+         else:[m
+[31m-[m
+             memories = state.get("memories", [])[m
+             history = state.get("conversation_history", [])[m
+ [m
+[36m@@ -299,9 +306,11 @@[m [mclass EnterpriseWorkflow:[m
+         }[m
+ [m
+     def sql_node(self, state: WorkflowState) -> dict[str, Any]:[m
+[31m-        pipeline = self._get_sql_pipeline(state["thread_id"])[m
+[32m+[m[32m        pipeline = self._get_sql_pipeline([m
+[32m+[m[32m            state["thread_id"],[m
+[32m+[m[32m            state.get("user_id", "local-user"),[m
+[32m+[m[32m        )[m
+ [m
+[31m-        # Clarification replies must be passed exactly as the user typed them.[m
+         if pipeline.conversation_state.status == "awaiting_clarification":[m
+             question = state["question"][m
+         else:[m
+[36m@@ -338,7 +347,7 @@[m [mclass EnterpriseWorkflow:[m
+     def rag_node(self, state: WorkflowState) -> dict[str, Any]:[m
+         try:[m
+             answer_result = self._get_rag_service().ask([m
+[31m-            state.get("rewritten_question") or state["question"][m
+[32m+[m[32m                state.get("rewritten_question") or state["question"][m
+             )[m
+ [m
+             result = {[m
+[36m@@ -373,7 +382,8 @@[m [mclass EnterpriseWorkflow:[m
+ [m
+         try:[m
+             sql_result = self._get_sql_pipeline([m
+[31m-                state["thread_id"][m
+[32m+[m[32m                state["thread_id"],[m
+[32m+[m[32m                state.get("user_id", "local-user"),[m
+             ).run(question)[m
+ [m
+             if sql_result["status"] == "success":[m
+[36m@@ -481,13 +491,71 @@[m [mclass EnterpriseWorkflow:[m
+                 "error": "Empty thread ID or user ID.",[m
+             }[m
+ [m
+[32m+[m[32m        remember_prefix = "remember that "[m
+[32m+[m
+[32m+[m[32m        if question.casefold().startswith(remember_prefix):[m
+[32m+[m[32m            fact = question[len(remember_prefix):].strip().rstrip(" .")[m
+[32m+[m
+[32m+[m[32m            if not fact:[m
+[32m+[m[32m                return {[m
+[32m+[m[32m                    "answer": "Please tell me what you'd like me to remember.",[m
+[32m+[m[32m                    "error": "Empty memory.",[m
+[32m+[m[32m                }[m
+[32m+[m
+[32m+[m[32m            sensitive_terms = ([m
+[32m+[m[32m                "password",[m
+[32m+[m[32m                "api key",[m
+[32m+[m[32m                "secret key",[m
+[32m+[m[32m                "access token",[m
+[32m+[m[32m                "credit card",[m
+[32m+[m[32m                "social security number",[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            if any(term in fact.casefold() for term in sensitive_terms):[m
+[32m+[m[32m                return {[m
+[32m+[m[32m                    "answer": ([m
+[32m+[m[32m                        "I can't save passwords, keys, tokens, or "[m
+[32m+[m[32m                        "payment or identity secrets as memories."[m
+[32m+[m[32m                    ),[m
+[32m+[m[32m                    "error": "Sensitive memory rejected.",[m
+[32m+[m[32m                }[m
+[32m+[m
+[32m+[m[32m            memory_key = ([m
+[32m+[m[32m                "user_note_"[m
+[32m+[m[32m                + hashlib.sha256([m
+[32m+[m[32m                    fact.casefold().encode("utf-8")[m
+[32m+[m[32m                ).hexdigest()[:16][m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                self.long_term_memory.save([m
+[32m+[m[32m                    user_id=user_id,[m
+[32m+[m[32m                    memory_key=memory_key,[m
+[32m+[m[32m                    memory_value=fact,[m
+[32m+[m[32m                )[m
+[32m+[m[32m            except Exception:[m
+[32m+[m[32m                return {[m
+[32m+[m[32m                    "answer": ([m
+[32m+[m[32m                        "I couldn't save that memory because persistent "[m
+[32m+[m[32m                        "memory is currently unavailable. Please try again."[m
+[32m+[m[32m                    ),[m
+[32m+[m[32m                    "error": "Memory persistence failed.",[m
+[32m+[m[32m                }[m
+[32m+[m
+[32m+[m[32m            return {[m
+[32m+[m[32m                "answer": f"I'll remember that: {fact}",[m
+[32m+[m[32m                "result": {[m
+[32m+[m[32m                    "status": "success",[m
+[32m+[m[32m                    "route": "memory",[m
+[32m+[m[32m                },[m
+[32m+[m[32m            }[m
+[32m+[m
+         state: WorkflowState = {[m
+             "question": question,[m
+             "thread_id": thread_id,[m
+             "user_id": user_id,[m
+         }[m
+ [m
+[31m-        # Keep checkpointed conversation state separate by user.[m
+         conversation_id = f"{user_id}:{thread_id}"[m
+ [m
+         return self.graph.invoke([m

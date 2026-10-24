@@ -90,6 +90,24 @@ def test_context_filter_removes_duplicates_and_empty_chunks():
     ]
 
 
+def test_context_filter_removes_identical_content_from_different_sources():
+    documents = [
+        Document(
+            page_content="Project Manager: Priya Sharma",
+            metadata={"source": "rag_smoke_test.txt"},
+        ),
+        Document(
+            page_content="Project Manager: Priya Sharma",
+            metadata={"source": "rag_smoke_test_v2.txt"},
+        ),
+    ]
+
+    results = ContextFilter().filter(documents)
+
+    assert len(results) == 1
+    assert results[0].page_content == "Project Manager: Priya Sharma"
+    assert results[0].metadata["source"] == "rag_smoke_test.txt"
+
 def test_context_filter_respects_character_budget():
     context_filter = ContextFilter(max_chunks=5, max_characters=10)
 

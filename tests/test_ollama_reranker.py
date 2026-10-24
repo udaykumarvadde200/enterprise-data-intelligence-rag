@@ -81,3 +81,49 @@ def test_reranker_rejects_invalid_batch_response(response):
 
     with pytest.raises(ValueError):
         reranker.rerank("query", [doc("First"), doc("Second")])
+
+
+def test_reranker_retries_when_model_returns_extra_score():
+    model = FakeOllama(
+        '{"scores": [{"index": 0, "score": 20}, '
+        '{"index": 1, "score": 99}]}'
+    )
+    model.responses = [
+        model.response,
+        '{"scores": [{"index": 0, "score": 15}]}',
+    ]
+
+    def invoke(prompt):
+        model.calls.append(prompt)
+        response = model.responses.pop(0)
+        return SimpleNamespace(content=response)
+
+    model.invoke = invoke
+    reranker = OllamaRelevanceReranker(model=model, max_retries=1)
+
+    scores = reranker._scores("Apollo project risk?", [doc("Resume content")])
+
+    assert scores == [15.0]
+    assert len(model.calls) == 2
+    assert "Correct the response" in model.calls[1]
+
+
+def test_reranker_raises_after_retry_if_response_is_still_invalid():
+    model = FakeOllama(
+        '{"scores": [{"index": 0, "score": 20}, '
+        '{"index": 1, "score": 99}]}'
+    )
+    reranker = OllamaRelevanceReranker(model=model, max_retries=1)
+
+    with pytest.raises(ValueError, match="incorrect number of scores"):
+        reranker._scores("Apollo project risk?", [doc("Resume content")])
+
+    assert len(model.calls) == 2
+
+
+def test_reranker_accepts_valid_single_document_response():
+    model = FakeOllama('{"scores": [{"index": 0, "score": 12}]}')
+    reranker = OllamaRelevanceReranker(model=model)
+
+    assert reranker._scores("Apollo project risk?", [doc("Resume")]) == [12.0]
+    assert len(model.calls) == 1

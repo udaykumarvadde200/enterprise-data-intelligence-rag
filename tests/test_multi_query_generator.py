@@ -32,8 +32,10 @@ def test_removes_numbering_and_bullets():
         "2) Order volume analysis\n"
         "- Sales performance"
     )
-    generator = MultiQueryGenerator(llm_client=llm)
-
+    generator = MultiQueryGenerator(
+    llm_client=llm,
+    max_alternatives=3,
+)
     result = generator.generate("Show sales")
 
     assert result == [

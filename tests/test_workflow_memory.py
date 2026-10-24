@@ -86,3 +86,53 @@ def test_general_response_uses_retrieved_memory():
     prompt = llm.invoke.call_args.args[0]
     assert "Building an Advanced RAG system" in prompt
     assert "What is my project?" in prompt
+def test_explicit_remember_request_saves_user_scoped_memory():
+    workflow, memory = make_workflow()
+
+    result = workflow.ask(
+        "Remember that my project is Advanced RAG",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+
+    memory.save.assert_called_once()
+    saved = memory.save.call_args.kwargs
+
+    assert saved["user_id"] == "user-1"
+    assert saved["memory_value"] == "my project is Advanced RAG"
+    assert saved["memory_key"].startswith("user_note_")
+    assert result["result"]["route"] == "memory"
+
+
+def test_ordinary_question_does_not_save_long_term_memory():
+    workflow, memory = make_workflow()
+    workflow.graph = MagicMock()
+    workflow.graph.invoke.return_value = {
+        "answer": "Hello",
+        "result": {"status": "success"},
+    }
+
+    result = workflow.ask(
+        "Hello",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+
+    assert result["answer"] == "Hello"
+    memory.save.assert_not_called()
+    workflow.graph.invoke.assert_called_once()
+
+def test_remember_request_handles_database_failure():
+    workflow, memory = make_workflow()
+    workflow.graph = MagicMock()
+    memory.save.side_effect = RuntimeError("Database unavailable")
+
+    result = workflow.ask(
+        "Remember that my project is Advanced RAG",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+
+    assert result["error"] == "Memory persistence failed."
+    memory.save.assert_called_once()
+    workflow.graph.invoke.assert_not_called()
