@@ -95,15 +95,20 @@ PostgreSQL).
   answer, citation kept, only the relevant source returned.
 - Live model checks: a correct answer is accepted; an unsupported claim and a
   contradicting claim are rejected.
+- Streamlit UI against the live API: a database question routed to `sql`
+  and showed the executed SQL and result; an off-topic document question
+  abstained with no sources.
+- PostgreSQL rejects write attempts on a connection with `read_only` set (the
+  same setting the SQL executor applies): `CREATE TEMP TABLE` fails with
+  `ReadOnlySqlTransaction`.
 - Unit tests for the SQL validator and executor (the executor against mocks),
   the context filter, the answer generator, the API, and memory.
 
 ## Not yet verified
 
-- The read-only transaction against a real PostgreSQL server
-- Off-topic abstention through the live API
 - Document ingestion edge cases and prompt-injection resistance
-- The Streamlit UI end to end, and behavior after an API restart
+- Document questions and follow-up questions in the Streamlit UI, and
+  behavior after an API restart
 - Retrieval quality beyond a handful of queries; no benchmark numbers are
   reported here
 
@@ -118,4 +123,7 @@ PostgreSQL).
   split a sentence; this fails closed (possible abstention, never approval).
 - The grounding verifier is a 3B model; its judgments are not guaranteed.
 - Multi-query retrieval exists but is off by default.
-- The router is keyword-based.
+- The router is keyword-based. A question that contains both document words
+  and database words (for example "refund policy for enterprise customers")
+  goes to the `hybrid` route, where the database half may report that no
+  records matched even though the question is not a database question.
