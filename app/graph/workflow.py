@@ -1,5 +1,5 @@
-
 import hashlib
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -325,7 +325,10 @@ class EnterpriseWorkflow:
             if result["status"] in {"clarification_required", "not_found"}:
                 answer = result["message"]
             elif result["status"] == "success":
-                answer = self._format_sql_result(result)
+                answer = self._format_sql_result(
+                    result,
+                    self._executor_columns(pipeline),
+                )
             else:
                 answer = str(result)
 
@@ -384,13 +387,17 @@ class EnterpriseWorkflow:
         question = state.get("rewritten_question") or state["question"]
 
         try:
-            sql_result = self._get_sql_pipeline(
+            sql_pipeline = self._get_sql_pipeline(
                 state["thread_id"],
                 state.get("user_id", "local-user"),
-            ).run(question)
+            )
+            sql_result = sql_pipeline.run(question)
 
             if sql_result["status"] == "success":
-                sql_answer = self._format_sql_result(sql_result)
+                sql_answer = self._format_sql_result(
+                    sql_result,
+                    self._executor_columns(sql_pipeline),
+                )
             elif sql_result["status"] in {
                 "clarification_required",
                 "not_found",
@@ -457,11 +464,56 @@ class EnterpriseWorkflow:
         }
 
     @staticmethod
-    def _format_sql_result(result: dict[str, Any]) -> str:
+    def _executor_columns(pipeline: Any) -> list[str]:
+        """Column names of the pipeline's last query, or [] if unknown."""
+        columns = getattr(
+            getattr(pipeline, "sql_executor", None),
+            "last_columns",
+            None,
+        )
+
+        if isinstance(columns, (list, tuple)):
+            return [str(column) for column in columns]
+
+        return []
+
+    @staticmethod
+    def _format_cell(value: Any) -> str:
+        """Render one database value as readable table text."""
+        if value is None:
+            return "NULL"
+
+        text = format(value, "f") if isinstance(value, Decimal) else str(value)
+
+        return text.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+    @staticmethod
+    def _format_sql_result(
+        result: dict[str, Any],
+        columns: list[str] | None = None,
+    ) -> str:
         rows = result.get("results", [])
 
         if not rows:
             return "The query completed successfully, but no records matched."
+
+        columns = list(columns or [])
+
+        # With known column names, show a readable table.
+        if columns and all(len(row) == len(columns) for row in rows):
+            cell = EnterpriseWorkflow._format_cell
+            header = "| " + " | ".join(cell(name) for name in columns) + " |"
+            divider = "| " + " | ".join("---" for _ in columns) + " |"
+            body = "\n".join(
+                "| " + " | ".join(cell(value) for value in row) + " |"
+                for row in rows
+            )
+
+            return (
+                "Query completed successfully.\n\n"
+                f"SQL:\n{result['sql']}\n\n"
+                f"Results:\n\n{header}\n{divider}\n{body}"
+            )
 
         formatted_rows = "\n".join(str(row) for row in rows)
 
