@@ -51,3 +51,10 @@ chroma_db_rag_smoke/
 
 # End-to-end RAG smoke-test database
 chroma_db_rag_smoke/
+
+
+audit_bundle.txt
+jsk
+project_completion_review.txt
+verifier_probe.py
+sql_safety_probe.py
