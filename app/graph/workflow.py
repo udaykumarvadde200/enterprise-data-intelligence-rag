@@ -1,8 +1,12 @@
 import hashlib
+import logging
+import os
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -22,6 +26,45 @@ from app.rag.rag_service import RAGService
 from app.rag.retrieval_pipeline import RetrievalPipeline
 from app.rag.vector_store import ChromaVectorStore
 from app.sql.sql_pipeline import SQLPipeline
+from app.writes.parser import (
+    MissingAmountError,
+    WriteRequestError,
+    looks_like_purchase,
+    parse_purchase,
+)
+from app.writes.service import PendingPurchase, PurchaseWriter
+
+# Make ALLOW_WRITES from .env visible before the first chat message.
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# A bare "yes" with nothing waiting should get a clear answer, not chat.
+# Weaker words such as "ok" or "sure" are left to normal conversation.
+BARE_CONFIRMATIONS = frozenset(
+    {"yes", "yes please", "confirm", "save it", "do it", "go ahead"}
+)
+
+# Small talk is never rewritten into a search query: the small local model
+# would otherwise turn "hi" into a question about the previous topic.
+GREETINGS = frozenset(
+    {
+        "hi", "hello", "hey", "hi there", "hello there", "good morning",
+        "good afternoon", "good evening",
+    }
+)
+ACKNOWLEDGEMENTS = frozenset(
+    {
+        "ok", "okay", "oh ok", "oh okay", "ok thanks", "okay thanks",
+        "ok thank you", "got it", "cool", "great", "nice", "alright",
+        "fine", "i see", "understood", "perfect",
+    }
+)
+SMALL_TALK = (
+    GREETINGS
+    | ACKNOWLEDGEMENTS
+    | frozenset({"thanks", "thank you", "thanks a lot", "bye", "goodbye"})
+)
 
 
 class EnterpriseWorkflow:
@@ -31,6 +74,7 @@ class EnterpriseWorkflow:
         self,
         rag_service: RAGService | None = None,
         long_term_memory: LongTermMemory | None = None,
+        purchase_writer: PurchaseWriter | None = None,
     ):
         self.router = QueryRouter()
         self.sql_pipelines: dict[tuple[str, str], SQLPipeline] = {}
@@ -38,6 +82,10 @@ class EnterpriseWorkflow:
         self._rag_service = rag_service
         self.long_term_memory = long_term_memory or LongTermMemory()
         self.query_rewriter = QueryRewriter()
+        self.purchase_writer = purchase_writer or PurchaseWriter()
+        # Unsaved data-entry requests waiting for the user's yes/no,
+        # keyed by (user_id, thread_id).
+        self.pending_writes: dict[tuple[str, str], PendingPurchase] = {}
 
         builder = StateGraph(WorkflowState)
 
@@ -46,6 +94,7 @@ class EnterpriseWorkflow:
         builder.add_node("sql", self.sql_node)
         builder.add_node("rag", self.rag_node)
         builder.add_node("hybrid", self.hybrid_node)
+        builder.add_node("write", self.write_node)
         builder.add_node("record_turn", self.record_turn_node)
 
         builder.add_edge(START, "route")
@@ -58,6 +107,7 @@ class EnterpriseWorkflow:
                 "sql": "sql",
                 "rag": "rag",
                 "hybrid": "hybrid",
+                "write": "write",
             },
         )
 
@@ -65,6 +115,7 @@ class EnterpriseWorkflow:
         builder.add_edge("sql", "record_turn")
         builder.add_edge("rag", "record_turn")
         builder.add_edge("hybrid", "record_turn")
+        builder.add_edge("write", "record_turn")
         builder.add_edge("record_turn", END)
 
         self.graph = builder.compile(checkpointer=self.checkpointer)
@@ -173,10 +224,21 @@ class EnterpriseWorkflow:
         user_id = state.get("user_id", "local-user")
         history = state.get("conversation_history", [])
 
-        rewritten_question = self.query_rewriter.rewrite(
-            question,
-            history,
-        )
+        # Data entry is decided on the raw message, before any rewriting.
+        if self._is_write_turn(question, (user_id, thread_id)):
+            return {
+                "route": "write",
+                "memories": [],
+                "rewritten_question": question,
+            }
+
+        if self._is_small_talk(question):
+            rewritten_question = question
+        else:
+            rewritten_question = self.query_rewriter.rewrite(
+                question,
+                history,
+            )
 
         try:
             memories = self.long_term_memory.search(
@@ -208,6 +270,118 @@ class EnterpriseWorkflow:
             "route": route,
             "memories": memories,
             "rewritten_question": rewritten_question,
+        }
+
+    @staticmethod
+    def writes_enabled() -> bool:
+        """Chat data entry is on unless ALLOW_WRITES is set to false."""
+        value = os.getenv("ALLOW_WRITES", "true").strip().lower()
+        return value not in {"0", "false", "no", "off"}
+
+    def _live_pending(self, key: tuple[str, str]) -> PendingPurchase | None:
+        pending = self.pending_writes.get(key)
+
+        if pending is not None and self.purchase_writer.is_expired(pending):
+            del self.pending_writes[key]
+            return None
+
+        return pending
+
+    def _is_write_turn(self, question: str, key: tuple[str, str]) -> bool:
+        pending = self._live_pending(key)
+
+        if pending is not None:
+            if self.purchase_writer.classify(pending, question) is not None:
+                return True
+
+            # Any other message abandons the unsaved request. Nothing was
+            # written, so nothing needs to be undone.
+            del self.pending_writes[key]
+
+        if looks_like_purchase(question):
+            return True
+
+        return self.writes_enabled() and self._is_bare_confirmation(question)
+
+    @staticmethod
+    def _is_small_talk(text: str) -> bool:
+        words = " ".join(text.casefold().strip(" \t!.,?").split())
+        return words in SMALL_TALK
+
+    @staticmethod
+    def _is_bare_confirmation(text: str) -> bool:
+        words = " ".join(re.sub(r"[^\w' ]", " ", text.casefold()).split())
+        return words in BARE_CONFIRMATIONS
+
+    def write_node(self, state: WorkflowState) -> dict[str, Any]:
+        """Handle 'NAME bought PRODUCT for AMOUNT' with confirm-then-save."""
+        question = state["question"]
+        key = (state.get("user_id", "local-user"), state["thread_id"])
+
+        if not self.writes_enabled():
+            self.pending_writes.pop(key, None)
+            return {
+                "answer": (
+                    "Adding data through chat is turned off "
+                    "(ALLOW_WRITES=false)."
+                ),
+                "result": {"status": "disabled", "route": "write"},
+            }
+
+        try:
+            pending = self._live_pending(key)
+            reply = (
+                self.purchase_writer.respond(pending, question)
+                if pending is not None
+                else None
+            )
+
+            if reply is None and not looks_like_purchase(question):
+                self.pending_writes.pop(key, None)
+                return {
+                    "answer": (
+                        "There is nothing waiting to be saved. To add an "
+                        "order, write a sentence such as: "
+                        "Uday bought iPhone for 80k"
+                    ),
+                    "result": {"status": "nothing_pending", "route": "write"},
+                }
+
+            if reply is None:
+                try:
+                    reply = self.purchase_writer.prepare(parse_purchase(question))
+                except MissingAmountError as missing:
+                    reply = self.purchase_writer.prepare_partial(missing.partial)
+
+        except WriteRequestError as exc:
+            self.pending_writes.pop(key, None)
+            return {
+                "answer": str(exc),
+                "result": {"status": "invalid_request", "route": "write"},
+            }
+        except Exception:
+            logger.exception("Chat data entry failed.")
+            self.pending_writes.pop(key, None)
+            return {
+                "answer": (
+                    "I couldn't process that data entry. Nothing was saved."
+                ),
+                "error": "Data entry failed. Check local logs for details.",
+                "result": {"status": "error", "route": "write"},
+            }
+
+        if reply.pending is None:
+            self.pending_writes.pop(key, None)
+        else:
+            self.pending_writes[key] = reply.pending
+
+        return {
+            "answer": reply.message,
+            "result": {
+                "status": reply.status,
+                "route": "write",
+                **reply.details,
+            },
         }
 
     def select_route(self, state: WorkflowState) -> str:
@@ -251,6 +425,11 @@ class EnterpriseWorkflow:
             answer = "You're welcome! What would you like to explore next?"
         elif normalized in {"bye", "goodbye"}:
             answer = "Goodbye! Come back whenever you need help."
+        elif normalized in ACKNOWLEDGEMENTS:
+            answer = (
+                "Okay! Ask about your documents or database, or add an order "
+                "such as: Uday bought iPhone for 80k"
+            )
         else:
             memories = state.get("memories", [])
             history = state.get("conversation_history", [])

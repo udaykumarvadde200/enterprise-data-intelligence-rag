@@ -12,6 +12,10 @@ PostgreSQL database. Everything runs locally with Ollama; no paid APIs.
   over PostgreSQL, with a clarification step when a customer name is ambiguous.
 - **Routing:** a keyword-based router chooses `general`, `rag`, `sql` or
   `hybrid`. Follow-up questions are rewritten using recent conversation.
+- **Data entry by chat:** a sentence such as `Uday bought iPhone for 80k` is
+  parsed by code (not by the model), shown back for confirmation, and saved
+  as an order only after the user replies `yes`. Unknown customers can be
+  created in the same step; ambiguous names trigger a "which one?" question.
 - **Memory:** per-thread conversation state (LangGraph, held in memory) and
   per-user long-term memory stored in PostgreSQL.
 
@@ -29,6 +33,10 @@ RAG:  Chroma dense (k=10) + BM25 (k=10) -> RRF (k=60)
 
 SQL:  schema-aware generation -> syntax check -> schema check
       -> read-only check -> read-only transaction (10 s timeout, 500 rows)
+
+Write: "NAME bought PRODUCT for AMOUNT" -> rule-based parser -> customer lookup
+      -> confirmation message -> "yes" -> fixed, parameterized INSERTs
+      (orders, and customers when a new one is confirmed)
 ```
 
 ## Requirements
@@ -65,6 +73,10 @@ streamlit run streamlit_app.py
 - Upload documents in the UI or with `POST /documents/upload`. Files are saved
   to `data/documents`, and the index is rebuilt on the next document question.
 - Ask questions with `POST /ask` (`question`, `thread_id`, `user_id`).
+- Add rows in bulk from a CSV with `python add_data.py` (preview first,
+  `--commit` to insert).
+- Chat data entry is on by default. Set `ALLOW_WRITES=false` in `.env` to
+  turn it off.
 
 ## Tests
 
@@ -86,6 +98,12 @@ PostgreSQL).
   recognized by the validator are rejected. Queries must match the database
   schema. Execution uses a read-only transaction with a statement timeout and
   a row cap.
+- **Chat data entry:** the language model never writes SQL for this. Amounts,
+  dates and names are extracted by fixed rules; only two parameterized
+  INSERT statements exist (`orders`, `customers`); nothing is saved without
+  an explicit `yes`; a failed save rolls back both inserts; any other
+  message, or ten minutes, abandons an unsaved request. Updates and deletes
+  are not possible through chat.
 - **Uploads:** extension allow-list, size limit, sanitized filenames, and no
   overwriting of existing files.
 
@@ -109,6 +127,8 @@ PostgreSQL).
 - Document ingestion edge cases and prompt-injection resistance
 - Document questions and follow-up questions in the Streamlit UI, and
   behavior after an API restart
+- Chat data entry against the project's own database through the UI (it was
+  tested end to end against a separate test PostgreSQL server)
 - Retrieval quality beyond a handful of queries; no benchmark numbers are
   reported here
 
@@ -127,3 +147,10 @@ PostgreSQL).
   and database words (for example "refund policy for enterprise customers")
   goes to the `hybrid` route, where the database half may report that no
   records matched even though the question is not a database question.
+- Chat data entry understands one phrasing family (`NAME bought|purchased|
+  ordered PRODUCT for|worth|at AMOUNT`, with amounts like `80k`, `1.5 lakh`,
+  `1,20,000`, and optional `today`, `yesterday` or a date). Other wording is
+  not recorded.
+- Anyone who can reach the API can add orders, because there is no login.
+  Use `ALLOW_WRITES=false` for anything beyond a local demo.
+- Unsaved data-entry requests are held in memory and are lost on restart.
