@@ -89,6 +89,31 @@ class QueryRouter:
         "list all",
     )
 
+    # Words that clearly ask for database work. A question that also has
+    # document intent is treated as hybrid.
+    SQL_STRONG_KEYWORDS = (
+        "database",
+        "database records",
+        "total sales",
+        "revenue",
+        "count",
+        "average",
+        "maximum",
+        "minimum",
+        "highest",
+        "lowest",
+        "greater than",
+        "less than",
+        "above",
+        "below",
+        "how many",
+        "how much",
+    )
+
+    # Everything else in SQL_KEYWORDS ("customers", "orders", "show me", ...)
+    # is a weak signal: those words also appear in ordinary document
+    # questions such as "refund policy for enterprise customers".
+
     @classmethod
     def _contains_phrase(cls, question: str, phrases: tuple[str, ...]) -> bool:
         """Match phrases without accidentally matching inside other words."""
@@ -109,7 +134,7 @@ class QueryRouter:
             return "general"
 
         # Greetings and conversational messages should never query the database.
-        if normalized.strip(" \t!.,?") in self.GREETING_PATTERNS:            
+        if normalized.strip(" \t!.,?") in self.GREETING_PATTERNS:
             return "general"
 
         # Cross-source questions must take priority over single-source routing.
@@ -118,10 +143,16 @@ class QueryRouter:
 
         has_rag_intent = self._contains_phrase(normalized, self.RAG_KEYWORDS)
         has_sql_intent = self._contains_phrase(normalized, self.SQL_KEYWORDS)
+        has_strong_sql_intent = self._contains_phrase(
+            normalized, self.SQL_STRONG_KEYWORDS
+        )
 
-        # Explicit document intent wins over incidental database-related words.
-        if has_rag_intent and has_sql_intent:
+        # Document intent plus a clear request for database work is hybrid.
+        if has_rag_intent and has_strong_sql_intent:
             return "hybrid"
+
+        # Document intent wins over incidental database nouns such as
+        # "customers" or "orders" ("refund policy for enterprise customers").
 
         if has_rag_intent:
             return "rag"
@@ -131,3 +162,4 @@ class QueryRouter:
 
         # Do not guess that an unrecognized question is a database query.
         return "general"
+
